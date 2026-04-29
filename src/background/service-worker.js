@@ -2,6 +2,7 @@
 
 const STORAGE_KEY = "gwb:state:v1";
 const SOURCE = "gwb";
+const BRANCH_READY_TIMEOUT_MS = 60000;
 
 const DEFAULT_STATE = {
   branches: {}
@@ -115,7 +116,7 @@ async function handleCreateBranch(message, sender) {
     shareUrl,
     branchUrl: branchTab.url || shareUrl,
     tabId: branchTab.id,
-    windowId: branchWindow ? branchWindow.id : branchTab.windowId,
+    windowId: branchWindow ? branchWindow.id : null,
     status: "opening",
     createdAt: now,
     updatedAt: now,
@@ -141,13 +142,27 @@ async function handleSendPrompt(message) {
     throw new Error("Prompt is empty.");
   }
 
-  const state = await loadState();
-  const branch = state.branches[message.branchId];
+  let state = await loadState();
+  let branch = state.branches[message.branchId];
   if (!branch) {
     throw new Error("Branch not found.");
   }
   if (!Number.isInteger(branch.tabId)) {
     throw new Error("Branch worker is closed.");
+  }
+
+  if (branch.status !== "ready") {
+    await notifyParent(branch, {
+      type: "GWB_BRANCH_STATE",
+      branch: {
+        ...branch,
+        status: "opening",
+        error: "Preparing branch worker..."
+      }
+    });
+    branch = await waitForBranchReady(branch.id, BRANCH_READY_TIMEOUT_MS);
+    state = await loadState();
+    branch = state.branches[message.branchId] || branch;
   }
 
   branch.status = "sending";
@@ -180,6 +195,7 @@ async function handleBranchReady(message, sender) {
   });
 
   if (branch) {
+    await minimizeBranchWindow(branch);
     await notifyParent(branch, {
       type: "GWB_BRANCH_STATE",
       branch
@@ -244,6 +260,7 @@ async function handleBranchError(message, sender) {
   });
 
   if (branch) {
+    await minimizeBranchWindow(branch);
     await notifyParent(branch, {
       type: "GWB_BRANCH_STATE",
       branch
@@ -387,14 +404,17 @@ async function createBranchWorker(shareUrl) {
       url: shareUrl,
       type: "popup",
       focused: false,
-      state: "minimized"
+      width: 420,
+      height: 760,
+      left: 0,
+      top: 0
     });
     return {
       branchWindow,
       branchTab: await getWindowTab(branchWindow)
     };
   } catch (error) {
-    console.warn("[Gemini Web Brancher] Minimized window creation failed", error);
+    console.warn("[Gemini Web Brancher] Worker window creation failed", error);
   }
 
   try {
@@ -403,13 +423,6 @@ async function createBranchWorker(shareUrl) {
       type: "popup",
       focused: false
     });
-    try {
-      if (Number.isInteger(branchWindow.id)) {
-        await chrome.windows.update(branchWindow.id, { state: "minimized" });
-      }
-    } catch (error) {
-      console.warn("[Gemini Web Brancher] Could not minimize branch window", error);
-    }
     return {
       branchWindow,
       branchTab: await getWindowTab(branchWindow)
@@ -441,6 +454,45 @@ async function getWindowTab(window) {
   }
 
   throw new Error("Could not create branch worker window.");
+}
+
+async function waitForBranchReady(branchId, timeoutMs) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const state = await loadState();
+    const branch = state.branches[branchId];
+    if (!branch) {
+      throw new Error("Branch not found.");
+    }
+    if (branch.status === "ready") {
+      return branch;
+    }
+    if (branch.status === "error" || branch.status === "closed") {
+      throw new Error(branch.error || `Branch worker is ${branch.status}.`);
+    }
+    await sleep(500);
+  }
+
+  throw new Error("Timed out waiting for branch worker to become ready.");
+}
+
+async function minimizeBranchWindow(branch) {
+  if (!branch || !Number.isInteger(branch.windowId)) {
+    return;
+  }
+
+  try {
+    await chrome.windows.update(branch.windowId, {
+      state: "minimized"
+    });
+  } catch (error) {
+    console.warn("[Gemini Web Brancher] Could not minimize branch window", error);
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function requireSenderTab(sender) {

@@ -60,7 +60,7 @@
     installRuntimeListener();
     await sleep(1200);
     await continueSharedChatIfNeeded();
-    await waitForComposer(25000);
+    await waitForComposer(45000);
     await sendRuntime("GWB_BRANCH_READY", {
       branchId: state.branchMeta.id,
       url: location.href
@@ -361,13 +361,14 @@
     panel.querySelector("[data-role='title']").textContent = branchLabel(branch);
     panel.querySelector("[data-role='status']").textContent = branch.status || "opening";
     panel.querySelector("[data-role='output']").textContent = branch.lastOutput || "";
-    panel.querySelector("[data-role='error']").textContent = branch.error || "";
+    panel.querySelector("[data-role='error']").textContent = branch.status === "opening" ? "" : branch.error || "";
 
     const input = panel.querySelector(".gwb-input");
     const send = panel.querySelector(".gwb-send");
-    const isClosed = branch.status === "closed";
-    input.disabled = isClosed;
-    send.disabled = isClosed;
+    const canSend = branch.status === "ready";
+    input.disabled = branch.status === "closed";
+    send.disabled = !canSend;
+    send.textContent = canSend ? "Send" : "Wait";
   }
 
   async function sendPrompt(branchId, prompt) {
@@ -407,21 +408,27 @@
   async function continueSharedChatIfNeeded() {
     const button = await waitForElement(() => findButtonByTerms([
       "continue this chat",
+      "continue this conversation",
+      "continue in gemini",
       "continue chat",
+      "continue conversation",
       "continue",
+      "open in gemini",
       "继续此聊天",
       "继续这个聊天",
-      "继续聊天"
-    ]), 12000).catch(() => null);
+      "继续聊天",
+      "继续对话",
+      "在 gemini 中继续"
+    ]), 18000).catch(() => null);
 
     if (button) {
       button.click();
-      await sleep(1800);
+      await sleep(3000);
     }
   }
 
   async function submitPromptToGemini(prompt) {
-    const editor = await waitForComposer(20000);
+    const editor = await waitForComposer(45000);
     focusAndSetText(editor, prompt);
     await sleep(250);
 
@@ -573,13 +580,18 @@
     const selectors = [
       "textarea",
       "[contenteditable='true']",
+      "[contenteditable='plaintext-only']",
+      "[contenteditable]:not([contenteditable='false'])",
       "[role='textbox']",
       "div.ql-editor",
+      "rich-textarea [contenteditable]",
       "rich-textarea textarea"
     ];
 
     const editors = uniqueElements(selectors.flatMap((selector) => Array.from(document.querySelectorAll(selector))))
       .filter(isVisible)
+      .filter((element) => !element.matches("[readonly], [aria-readonly='true']"))
+      .filter((element) => !element.disabled && element.getAttribute("aria-disabled") !== "true")
       .filter((element) => !element.closest(`#${ROOT_ID}`));
 
     return editors[editors.length - 1] || null;

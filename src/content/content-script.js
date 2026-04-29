@@ -17,7 +17,6 @@
     root: null,
     panelList: null,
     statusText: null,
-    branchWakeTimers: new Map(),
     attachObserver: null,
     lastAnchor: null,
     parentConversationKey: "",
@@ -388,29 +387,64 @@
   }
 
   async function closeShareDialog() {
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      const surface = getShareSurface();
-      const closeButton = findDialogCloseButton(surface) || findDialogCloseButton(document);
-      if (closeButton) {
-        activateElement(closeButton);
-      } else {
-        closeAnyDialog();
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const surface = findShareDialogSurface();
+      if (!surface) {
+        return;
       }
-      await sleep(350);
+      const closeButton = findDialogCloseButton(surface) || findDialogCloseButton(document);
+      if (closeButton && isEnabled(closeButton)) {
+        activateElement(closeButton);
+      }
+      dispatchEscape();
+      await sleep(300);
+      if (!findShareDialogSurface()) {
+        return;
+      }
     }
   }
 
   function findDialogCloseButton(root) {
-    const closeTerms = [
-      "close",
-      "dismiss",
-      "done",
-      "cancel",
-      "关闭",
-      "完成",
-      "取消"
-    ];
-    return findButtonByTermsIn(root, closeTerms);
+    const candidates = queryAllDeep(root, "button, [role='button'], [aria-label], [title]")
+      .filter(isVisible)
+      .filter((element) => !element.closest(`#${ROOT_ID}`))
+      .map((element) => ({
+        element,
+        score: dialogCloseButtonScore(element)
+      }))
+      .filter((candidate) => candidate.score > 0)
+      .sort((a, b) => b.score - a.score);
+    return candidates[0]?.element || null;
+  }
+
+  function dialogCloseButtonScore(element) {
+    const label = getElementLabel(element).toLowerCase();
+    const visibleText = normalizeText(element.innerText || element.textContent || "").toLowerCase();
+    let score = 0;
+
+    if (/(^|\s)(close|dismiss|done|cancel|关闭|完成|取消)(\s|$)/i.test(label)) {
+      score += 30;
+    }
+    if (/^(close|cancel|关闭|取消|done|完成)$/i.test(visibleText)) {
+      score += 25;
+    }
+    if (/close|关闭/.test(label)) {
+      score += 20;
+    }
+    if (/close|关闭/.test(visibleText)) {
+      score += 15;
+    }
+    if (/copy|复制|create|生成|公开链接|public link|share|分享/.test(label) && !/close|关闭|cancel|取消|done|完成/.test(label)) {
+      score -= 60;
+    }
+
+    return score;
+  }
+
+  function findShareDialogSurface() {
+    return queryAllDeep(document, "[role='dialog'], mat-dialog-container, .cdk-overlay-pane")
+      .filter(isVisible)
+      .find((surface) => /share|copy link|public link|分享|复制链接|公开链接|创建链接|生成链接/i.test(getElementVisibleLabel(surface))) || null;
   }
 
   function renderBranches() {
@@ -534,52 +568,12 @@
       return;
     }
     if (branch.status === "closed") {
-      stopBranchWakeLoop(branch.id);
       state.branches.delete(branch.id);
       renderBranches();
       return;
     }
     state.branches.set(branch.id, branch);
-    if (branch.status === "sending" || branch.status === "streaming") {
-      startBranchWakeLoop(branch.id);
-    } else {
-      stopBranchWakeLoop(branch.id);
-    }
     renderBranches();
-  }
-
-  function startBranchWakeLoop(branchId) {
-    if (state.branchWakeTimers.has(branchId)) {
-      return;
-    }
-
-    const tick = () => {
-      const branch = state.branches.get(branchId);
-      if (!branch || (branch.status !== "sending" && branch.status !== "streaming")) {
-        stopBranchWakeLoop(branchId);
-        return;
-      }
-
-      sendRuntime("GWB_WAKE_BRANCH", {
-        branchId,
-        durationMs: 1200
-      }).catch((error) => {
-        console.warn("[Gemini Web Brancher] Could not wake branch worker", error);
-      });
-
-      const timer = setTimeout(tick, 5500);
-      state.branchWakeTimers.set(branchId, timer);
-    };
-
-    tick();
-  }
-
-  function stopBranchWakeLoop(branchId) {
-    const timer = state.branchWakeTimers.get(branchId);
-    if (timer) {
-      clearTimeout(timer);
-      state.branchWakeTimers.delete(branchId);
-    }
   }
 
   async function prepareBranchComposer(timeoutMs) {
@@ -653,11 +647,6 @@
       state.branchRenameRunning = true;
       state.branchRenameCancelled = false;
       try {
-        await sendRuntime("GWB_WAKE_BRANCH", {
-          branchId: state.branchMeta && state.branchMeta.id,
-          durationMs: 8500
-        }).catch(() => null);
-        await sleep(500);
         state.branchRenamePromise = renameBranchConversationIfNeeded();
         const renamed = await state.branchRenamePromise;
         if (!renamed && !state.branchRenameDone && state.branchRenameAttempts < 6) {
@@ -689,13 +678,7 @@
       return false;
     }
 
-    const opener = await waitForRenameMenuOpener(9000);
-    if (!opener || state.branchRenameCancelled) {
-      return false;
-    }
-
-    activateElement(opener);
-    const renameAction = await waitForElement(() => findRenameAction(), 5000).catch(() => null);
+    const renameAction = await openRenameActionMenu();
     if (!renameAction || state.branchRenameCancelled) {
       closeAnyDialog();
       return false;
@@ -731,6 +714,35 @@
     }
     await sleep(900);
     return true;
+  }
+
+  async function openRenameActionMenu() {
+    const opener = await waitForRenameMenuOpener(9000);
+    if (opener && !state.branchRenameCancelled) {
+      activateElement(opener);
+      const renameAction = await waitForElement(() => findRenameAction(), 5000).catch(() => null);
+      if (renameAction) {
+        return renameAction;
+      }
+      closeAnyDialog();
+      await sleep(250);
+    }
+
+    for (const container of findCurrentConversationContainers()) {
+      if (state.branchRenameCancelled) {
+        return null;
+      }
+      revealElementControls(container);
+      dispatchContextMenu(container);
+      const renameAction = await waitForElement(() => findRenameAction(), 1800).catch(() => null);
+      if (renameAction) {
+        return renameAction;
+      }
+      closeAnyDialog();
+      await sleep(250);
+    }
+
+    return null;
   }
 
   async function waitForRenameMenuOpener(timeoutMs) {
@@ -1510,6 +1522,35 @@
     element.click();
   }
 
+  function dispatchContextMenu(element) {
+    const rect = element.getBoundingClientRect();
+    const x = rect.left + Math.min(rect.width - 4, Math.max(4, rect.width / 2));
+    const y = rect.top + Math.min(rect.height - 4, Math.max(4, rect.height / 2));
+    element.dispatchEvent(new PointerEvent("pointerdown", {
+      bubbles: true,
+      button: 2,
+      buttons: 2,
+      clientX: x,
+      clientY: y,
+      pointerType: "mouse"
+    }));
+    element.dispatchEvent(new MouseEvent("mousedown", {
+      bubbles: true,
+      button: 2,
+      buttons: 2,
+      clientX: x,
+      clientY: y
+    }));
+    element.dispatchEvent(new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      button: 2,
+      buttons: 2,
+      clientX: x,
+      clientY: y
+    }));
+  }
+
   function getElementLabel(element) {
     return [
       element.getAttribute("aria-label"),
@@ -1680,14 +1721,33 @@
       "取消"
     ]);
     if (closeButton) {
-      closeButton.click();
+      activateElement(closeButton);
       return;
     }
-    document.dispatchEvent(new KeyboardEvent("keydown", {
+    dispatchEscape();
+  }
+
+  function dispatchEscape() {
+    const eventInit = {
       key: "Escape",
       code: "Escape",
-      bubbles: true
-    }));
+      keyCode: 27,
+      which: 27,
+      bubbles: true,
+      cancelable: true
+    };
+    const targets = uniqueElements([
+      document.activeElement,
+      document.body,
+      document.documentElement,
+      document,
+      window
+    ].filter(Boolean));
+    for (const target of targets) {
+      for (const type of ["keydown", "keyup"]) {
+        target.dispatchEvent(new KeyboardEvent(type, eventInit));
+      }
+    }
   }
 
   async function sendRuntime(type, payload = {}) {

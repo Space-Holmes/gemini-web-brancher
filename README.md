@@ -25,11 +25,30 @@
 
 ## 本地安装
 
-1. 打开 Chrome: `chrome://extensions`
-2. 开启 Developer mode
-3. 选择 Load unpacked
-4. 选择本项目根目录
-5. 打开 `https://gemini.google.com/app` 并开始一段对话
+### 从 GitHub 下载源码 zip 安装
+
+1. 在 GitHub 仓库点击 Code -> Download ZIP。
+2. 解压 zip。
+3. 找到里面真正包含 `manifest.json` 的文件夹。通常是：
+
+   ```text
+   gemini-web-brancher-main/
+     manifest.json
+     src/
+     README.md
+   ```
+
+4. 打开 Chrome: `chrome://extensions`
+5. 开启 Developer mode
+6. 选择 Load unpacked
+7. 选择第 3 步那个包含 `manifest.json` 的文件夹。
+8. 打开 `https://gemini.google.com/app` 并开始一段对话。
+
+如果 Chrome 提示「清单文件缺失或不可读取」，说明选中的目录不是扩展根目录。不要选择 zip 文件、下载目录、外层解压目录、`src`、`docs` 或 `dist`；请选择第一层就能看见 `manifest.json` 的目录。
+
+### 从构建包安装
+
+如果你拿到的是 `gemini-web-brancher.zip` 构建包，先解压它，然后在 Load unpacked 里选择解压后的文件夹。该文件夹第一层也必须能看到 `manifest.json`。
 
 ## 开发命令
 

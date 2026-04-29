@@ -7,7 +7,7 @@
   const RESPONSE_IDLE_MS = 3500;
   const SHARE_LINK_TIMEOUT_MS = 30000;
   const SHARE_DOM_FALLBACK_DELAY_MS = 8000;
-  const SHARE_URL_PATTERN = /https:\/\/(?:g\.co\/gemini\/share\/|gemini\.google\.com\/share\/)[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]+/;
+  const SHARE_URL_PATTERN = /(?:https?:\/\/)?(?:g\.co\/gemini\/share\/|gemini\.google\.com\/share\/|gemini\.google\.com\/app\/[A-Za-z0-9_-]+\/share\/)[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]+/i;
 
   const state = {
     role: "unknown",
@@ -257,7 +257,7 @@
       const shareUrl = findShareUrlInDocument(surface);
       if (shareUrl) {
         domFallbackUrl = shareUrl;
-        if (Date.now() - startedAt > SHARE_DOM_FALLBACK_DELAY_MS) {
+        if (lastCopyClickAt || Date.now() - startedAt > SHARE_DOM_FALLBACK_DELAY_MS) {
           setStatus("Using generated Gemini share link...");
           return shareUrl;
         }
@@ -276,8 +276,7 @@
 
     try {
       const clipboard = await navigator.clipboard.readText();
-      const match = SHARE_URL_PATTERN.exec(clipboard || "");
-      return match ? match[0].replace(/[).,，。]+$/, "") : "";
+      return normalizeShareUrlMatch(clipboard || "");
     } catch {
       return "";
     }
@@ -523,12 +522,21 @@
 
   function findShareUrlInDocument(root = document) {
     const candidates = [];
-    for (const element of root.querySelectorAll("a[href], input, textarea")) {
+    for (const element of queryAllDeep(root, "a[href], input, textarea, [aria-label], [title], [data-tooltip], [data-link], [data-url]")) {
       if (element instanceof HTMLAnchorElement) {
         candidates.push(element.href || "");
       } else {
         candidates.push(element.value || "");
       }
+      candidates.push(
+        element.getAttribute("href") || "",
+        element.getAttribute("aria-label") || "",
+        element.getAttribute("title") || "",
+        element.getAttribute("data-tooltip") || "",
+        element.getAttribute("data-link") || "",
+        element.getAttribute("data-url") || "",
+        element.textContent || ""
+      );
     }
 
     const dialog = root === document ? getShareSurface() : root;
@@ -540,12 +548,45 @@
     }
 
     for (const value of candidates) {
-      const match = SHARE_URL_PATTERN.exec(value);
-      if (match) {
-        return match[0].replace(/[).,，。]+$/, "");
+      const shareUrl = normalizeShareUrlMatch(value);
+      if (shareUrl) {
+        return shareUrl;
       }
     }
     return "";
+  }
+
+  function normalizeShareUrlMatch(value) {
+    const match = SHARE_URL_PATTERN.exec(String(value || ""));
+    if (!match) {
+      return "";
+    }
+
+    let url = match[0]
+      .replace(/[).,，。]+$/, "")
+      .replace(/&amp;/g, "&")
+      .trim();
+    if (!/^https?:\/\//i.test(url)) {
+      url = `https://${url}`;
+    }
+    return url;
+  }
+
+  function queryAllDeep(root, selector) {
+    const results = [];
+    const visit = (node) => {
+      if (!node || !node.querySelectorAll) {
+        return;
+      }
+      results.push(...node.querySelectorAll(selector));
+      for (const element of node.querySelectorAll("*")) {
+        if (element.shadowRoot) {
+          visit(element.shadowRoot);
+        }
+      }
+    };
+    visit(root);
+    return uniqueElements(results);
   }
 
   function findButtonByTerms(terms) {

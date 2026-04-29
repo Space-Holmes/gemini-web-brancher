@@ -242,7 +242,7 @@
         parentConversationKey: state.parentConversationKey
       });
       upsertBranch(result.branch);
-      setStatus("Branch worker opened in a background tab.");
+      setStatus("Branch worker opened in a background window.");
     } catch (error) {
       setStatus(error.message || "Could not create branch.", { sticky: true, tone: "error" });
     } finally {

@@ -494,6 +494,25 @@ function conversationKeyFromUrl(url) {
 }
 
 async function createBranchWorker(shareUrl, parentTab) {
+  try {
+    const branchWindow = await chrome.windows.create({
+      url: shareUrl,
+      type: "normal",
+      focused: false,
+      width: 980,
+      height: 820
+    });
+    const branchTab = await getWindowTab(branchWindow);
+    await keepBranchTabAlive(branchTab);
+    return {
+      branchWindow,
+      branchTab,
+      workerMode: "background-window"
+    };
+  } catch (error) {
+    console.warn("[Gemini Web Brancher] Worker window creation failed", error);
+  }
+
   const tabCreateOptions = {
     url: shareUrl,
     active: false
@@ -502,6 +521,19 @@ async function createBranchWorker(shareUrl, parentTab) {
     tabCreateOptions.windowId = parentTab.windowId;
   }
   const branchTab = await chrome.tabs.create(tabCreateOptions);
+  await keepBranchTabAlive(branchTab);
+  return {
+    branchWindow: null,
+    branchTab,
+    workerMode: "background-tab-fallback"
+  };
+}
+
+async function keepBranchTabAlive(branchTab) {
+  if (!branchTab || !Number.isInteger(branchTab.id)) {
+    return;
+  }
+
   try {
     await chrome.tabs.update(branchTab.id, {
       autoDiscardable: false
@@ -509,11 +541,6 @@ async function createBranchWorker(shareUrl, parentTab) {
   } catch (error) {
     console.warn("[Gemini Web Brancher] Could not disable branch tab discard", error);
   }
-  return {
-    branchWindow: null,
-    branchTab,
-    workerMode: "background-tab"
-  };
 }
 
 async function getWindowTab(window) {

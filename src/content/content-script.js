@@ -4,7 +4,7 @@
   const SOURCE = "gwb";
   const ROOT_ID = "gwb-branch-root";
   const BUTTON_ID = "gwb-branch-button";
-  const RESPONSE_IDLE_MS = 3500;
+  const RESPONSE_IDLE_MS = 8000;
   const SHARE_LINK_TIMEOUT_MS = 30000;
   const SHARE_DOM_FALLBACK_DELAY_MS = 8000;
   const SHARE_URL_PATTERN = /(?:https?:\/\/)?(?:g\.co\/gemini\/share\/|gemini\.google\.com\/share\/|gemini\.google\.com\/app\/[A-Za-z0-9_-]+\/share\/)[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]+/i;
@@ -17,6 +17,7 @@
     root: null,
     panelList: null,
     statusText: null,
+    branchWakeTimers: new Map(),
     attachObserver: null,
     lastAnchor: null,
     parentConversationKey: "",
@@ -31,7 +32,10 @@
     branchStreaming: false,
     branchRenamePromise: null,
     branchRenameDone: false,
-    branchRenameCancelled: false
+    branchRenameCancelled: false,
+    branchRenameRunning: false,
+    branchRenameAttempts: 0,
+    branchRenameTimer: null
   };
 
   init().catch((error) => {
@@ -136,14 +140,11 @@
     await prepareBranchComposer(60000);
     state.branchRenameDone = false;
     state.branchRenameCancelled = false;
-    state.branchRenamePromise = renameBranchConversationIfNeeded();
-    state.branchRenamePromise.catch((error) => {
-      console.warn("[Gemini Web Brancher] Could not rename branch conversation", error);
-    });
     await sendRuntime("GWB_BRANCH_READY", {
       branchId: state.branchMeta.id,
       url: location.href
     });
+    scheduleBranchRenameWhenIdle(1500);
     observeBranchOutput();
   }
 
@@ -242,7 +243,7 @@
         parentConversationKey: state.parentConversationKey
       });
       upsertBranch(result.branch);
-      setStatus("Branch worker opened. It will minimize when ready.");
+      setStatus("Branch worker opened in a background tab.");
     } catch (error) {
       setStatus(error.message || "Could not create branch.", { sticky: true, tone: "error" });
     } finally {
@@ -284,13 +285,13 @@
 
     const shareUrl = await waitForGeneratedShareUrl(SHARE_LINK_TIMEOUT_MS);
     if (shareUrl) {
-      closeAnyDialog();
+      await closeShareDialog();
       return shareUrl;
     }
 
     const manualShareUrl = promptForVisibleShareUrl();
     if (manualShareUrl) {
-      closeAnyDialog();
+      await closeShareDialog();
       return manualShareUrl;
     }
 
@@ -384,6 +385,32 @@
   function promptForVisibleShareUrl() {
     const pasted = window.prompt("Gemini share link is visible but could not be captured automatically. Paste the visible share link here:");
     return normalizeShareUrlMatch(pasted || "");
+  }
+
+  async function closeShareDialog() {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const surface = getShareSurface();
+      const closeButton = findDialogCloseButton(surface) || findDialogCloseButton(document);
+      if (closeButton) {
+        activateElement(closeButton);
+      } else {
+        closeAnyDialog();
+      }
+      await sleep(350);
+    }
+  }
+
+  function findDialogCloseButton(root) {
+    const closeTerms = [
+      "close",
+      "dismiss",
+      "done",
+      "cancel",
+      "关闭",
+      "完成",
+      "取消"
+    ];
+    return findButtonByTermsIn(root, closeTerms);
   }
 
   function renderBranches() {
@@ -507,12 +534,52 @@
       return;
     }
     if (branch.status === "closed") {
+      stopBranchWakeLoop(branch.id);
       state.branches.delete(branch.id);
       renderBranches();
       return;
     }
     state.branches.set(branch.id, branch);
+    if (branch.status === "sending" || branch.status === "streaming") {
+      startBranchWakeLoop(branch.id);
+    } else {
+      stopBranchWakeLoop(branch.id);
+    }
     renderBranches();
+  }
+
+  function startBranchWakeLoop(branchId) {
+    if (state.branchWakeTimers.has(branchId)) {
+      return;
+    }
+
+    const tick = () => {
+      const branch = state.branches.get(branchId);
+      if (!branch || (branch.status !== "sending" && branch.status !== "streaming")) {
+        stopBranchWakeLoop(branchId);
+        return;
+      }
+
+      sendRuntime("GWB_WAKE_BRANCH", {
+        branchId,
+        durationMs: 1200
+      }).catch((error) => {
+        console.warn("[Gemini Web Brancher] Could not wake branch worker", error);
+      });
+
+      const timer = setTimeout(tick, 5500);
+      state.branchWakeTimers.set(branchId, timer);
+    };
+
+    tick();
+  }
+
+  function stopBranchWakeLoop(branchId) {
+    const timer = state.branchWakeTimers.get(branchId);
+    if (timer) {
+      clearTimeout(timer);
+      state.branchWakeTimers.delete(branchId);
+    }
   }
 
   async function prepareBranchComposer(timeoutMs) {
@@ -545,40 +612,70 @@
     const suffix = getBranchSuffix();
     if (!suffix) {
       state.branchRenameDone = true;
-      return;
+      return true;
     }
 
     try {
       for (let attempt = 0; attempt < 3; attempt += 1) {
         if (state.branchRenameCancelled) {
-          return;
+          return false;
         }
-        await sleep(attempt === 0 ? 1600 : 2500);
+        await sleep(attempt === 0 ? 450 : 1800);
         const renamed = await renameCurrentConversation(suffix);
         if (renamed) {
-          return;
+          state.branchRenameDone = true;
+          return true;
         }
       }
       console.warn("[Gemini Web Brancher] Could not find Gemini rename controls.");
     } catch (error) {
       console.warn("[Gemini Web Brancher] Could not rename branch conversation", error);
-    } finally {
-      state.branchRenameDone = true;
     }
+    return false;
   }
 
-  async function waitForBranchRenameBeforePrompt() {
-    if (!state.branchRenamePromise) {
+  function scheduleBranchRenameWhenIdle(delayMs = 4000) {
+    if (state.role !== "branch" || state.branchRenameDone || state.branchRenameRunning || state.branchRenameAttempts >= 6) {
       return;
     }
 
-    await Promise.race([
-      state.branchRenamePromise.catch(() => null),
-      sleep(3500)
-    ]);
-    if (!state.branchRenameDone) {
+    clearTimeout(state.branchRenameTimer);
+    state.branchRenameTimer = setTimeout(async () => {
+      if (state.branchRenameDone || state.branchRenameRunning) {
+        return;
+      }
+      if (state.branchStreaming) {
+        scheduleBranchRenameWhenIdle(5000);
+        return;
+      }
+
+      state.branchRenameAttempts += 1;
+      state.branchRenameRunning = true;
+      state.branchRenameCancelled = false;
+      try {
+        await sendRuntime("GWB_WAKE_BRANCH", {
+          branchId: state.branchMeta && state.branchMeta.id,
+          durationMs: 8500
+        }).catch(() => null);
+        await sleep(500);
+        state.branchRenamePromise = renameBranchConversationIfNeeded();
+        const renamed = await state.branchRenamePromise;
+        if (!renamed && !state.branchRenameDone && state.branchRenameAttempts < 6) {
+          scheduleBranchRenameWhenIdle(12000);
+        }
+      } finally {
+        state.branchRenameRunning = false;
+      }
+    }, delayMs);
+  }
+
+  function cancelBranchRenameForPrompt() {
+    if (state.branchRenameRunning || state.branchRenamePromise) {
       state.branchRenameCancelled = true;
+      closeAnyDialog();
     }
+    clearTimeout(state.branchRenameTimer);
+    state.branchRenameTimer = null;
   }
 
   async function renameCurrentConversation(suffix) {
@@ -1025,7 +1122,7 @@
   }
 
   async function submitPromptToGemini(prompt, turnId) {
-    await waitForBranchRenameBeforePrompt();
+    cancelBranchRenameForPrompt();
     closeAnyDialog();
     await sleep(150);
 
@@ -1108,6 +1205,7 @@
         html: state.branchLastHtml,
         url: location.href
       }).catch(console.error);
+      scheduleBranchRenameWhenIdle(3000);
     }, RESPONSE_IDLE_MS);
   }
 

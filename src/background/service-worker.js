@@ -70,6 +70,9 @@ async function handleMessage(message, sender) {
     case "GWB_FOCUS_BRANCH":
       return handleFocusBranch(message);
 
+    case "GWB_WAKE_BRANCH":
+      return handleWakeBranch(message);
+
     case "GWB_LIST_ALL_BRANCHES":
       return handleListAllBranches();
 
@@ -121,7 +124,7 @@ async function handleCreateBranch(message, sender) {
   const parentConversationKey = message.parentConversationKey || conversationKeyFromUrl(parentUrl);
   const branchNumber = nextBranchNumber(state, parentTabId, parentConversationKey);
   const branchSuffix = `_branch${branchNumber}`;
-  const { branchWindow, branchTab } = await createBranchWorker(shareUrl, parentTab);
+  const { branchWindow, branchTab, workerMode } = await createBranchWorker(shareUrl, parentTab);
 
   const now = Date.now();
   const branch = {
@@ -136,7 +139,7 @@ async function handleCreateBranch(message, sender) {
     branchUrl: branchTab.url || shareUrl,
     tabId: branchTab.id,
     windowId: branchWindow ? branchWindow.id : null,
-    workerMode: branchWindow ? "popup" : "visible-tab-fallback",
+    workerMode,
     status: "opening",
     createdAt: now,
     updatedAt: now,
@@ -152,7 +155,7 @@ async function handleCreateBranch(message, sender) {
     type: "GWB_BRANCH_STATE",
     branch
   });
-  await keepParentFocused(branch);
+  await wakeBranchForAutomation(branch, 4500);
 
   return { branch };
 }
@@ -206,6 +209,8 @@ async function handleSendPrompt(message) {
     branch
   });
 
+  await wakeBranchForAutomation(branch, 3200);
+  await sleep(300);
   await chrome.tabs.sendMessage(branch.tabId, {
     source: SOURCE,
     type: "GWB_BRANCH_SUBMIT_PROMPT",
@@ -364,6 +369,20 @@ async function handleFocusBranch(message) {
   return { branch };
 }
 
+async function handleWakeBranch(message) {
+  const state = await loadState();
+  const branch = state.branches[message.branchId];
+  if (!branch) {
+    throw new Error("Branch not found.");
+  }
+  if (!Number.isInteger(branch.tabId)) {
+    throw new Error("Branch worker is closed.");
+  }
+
+  await wakeBranchForAutomation(branch, Number(message.durationMs) || 1000);
+  return { branch };
+}
+
 async function handleListAllBranches() {
   const state = await loadState();
   return {
@@ -498,40 +517,6 @@ function conversationKeyFromUrl(url) {
 }
 
 async function createBranchWorker(shareUrl, parentTab) {
-  try {
-    const branchWindow = await chrome.windows.create({
-      url: shareUrl,
-      type: "popup",
-      focused: false,
-      width: 1120,
-      height: 850,
-      left: 80,
-      top: 40
-    });
-    return {
-      branchWindow,
-      branchTab: await getWindowTab(branchWindow)
-    };
-  } catch (error) {
-    console.warn("[Gemini Web Brancher] Worker window creation failed", error);
-  }
-
-  try {
-    const branchWindow = await chrome.windows.create({
-      url: shareUrl,
-      type: "popup",
-      focused: false,
-      width: 1120,
-      height: 850
-    });
-    return {
-      branchWindow,
-      branchTab: await getWindowTab(branchWindow)
-    };
-  } catch (error) {
-    console.warn("[Gemini Web Brancher] Popup window creation failed", error);
-  }
-
   const tabCreateOptions = {
     url: shareUrl,
     active: false
@@ -542,7 +527,8 @@ async function createBranchWorker(shareUrl, parentTab) {
   const branchTab = await chrome.tabs.create(tabCreateOptions);
   return {
     branchWindow: null,
-    branchTab
+    branchTab,
+    workerMode: "background-tab"
   };
 }
 
@@ -589,6 +575,9 @@ async function keepParentFocused(branch) {
 
   try {
     const parentTab = await chrome.tabs.get(branch.parentTabId);
+    await chrome.tabs.update(branch.parentTabId, {
+      active: true
+    });
     if (Number.isInteger(parentTab.windowId)) {
       await chrome.windows.update(parentTab.windowId, {
         focused: true
@@ -597,6 +586,30 @@ async function keepParentFocused(branch) {
   } catch (error) {
     console.warn("[Gemini Web Brancher] Could not restore parent focus", error);
   }
+}
+
+async function wakeBranchForAutomation(branch, durationMs) {
+  if (!branch || !Number.isInteger(branch.tabId)) {
+    return;
+  }
+
+  try {
+    const tab = await chrome.tabs.update(branch.tabId, { active: true });
+    const windowId = Number.isInteger(branch.windowId) ? branch.windowId : tab.windowId;
+    if (Number.isInteger(windowId)) {
+      await chrome.windows.update(windowId, {
+        focused: true,
+        state: "normal"
+      });
+    }
+  } catch (error) {
+    console.warn("[Gemini Web Brancher] Could not wake branch worker", error);
+    return;
+  }
+
+  setTimeout(() => {
+    keepParentFocused(branch).catch(console.error);
+  }, Math.max(300, Math.min(Number(durationMs) || 1000, 10000)));
 }
 
 function sleep(ms) {

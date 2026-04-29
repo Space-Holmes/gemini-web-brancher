@@ -522,7 +522,8 @@ function isGeminiShareUrl(url) {
     const parsed = new URL(url);
     return (
       (parsed.hostname === "g.co" && parsed.pathname.startsWith("/gemini/share/")) ||
-      (parsed.hostname === "gemini.google.com" && parsed.pathname.startsWith("/share/"))
+      (parsed.hostname === "gemini.google.com" && parsed.pathname.startsWith("/share/")) ||
+      (parsed.hostname === "gemini.google.com" && /^\/app\/[A-Za-z0-9_-]+\/share\//.test(parsed.pathname))
     );
   } catch {
     return false;

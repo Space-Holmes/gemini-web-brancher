@@ -197,7 +197,13 @@
       return shareUrl;
     }
 
-    throw new Error("Gemini did not expose a share link. Try opening the share panel once, then click Branch again.");
+    const manualShareUrl = promptForVisibleShareUrl();
+    if (manualShareUrl) {
+      closeAnyDialog();
+      return manualShareUrl;
+    }
+
+    throw new Error("Gemini share link was visible but could not be captured. Paste the visible share link when prompted, or click Branch again after copying it.");
   }
 
   async function waitForGeneratedShareUrl(timeoutMs) {
@@ -280,6 +286,11 @@
     } catch {
       return "";
     }
+  }
+
+  function promptForVisibleShareUrl() {
+    const pasted = window.prompt("Gemini share link is visible but could not be captured automatically. Paste the visible share link here:");
+    return normalizeShareUrlMatch(pasted || "");
   }
 
   function renderBranches() {

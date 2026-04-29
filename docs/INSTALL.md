@@ -35,7 +35,7 @@ If Chrome says the manifest is missing or unreadable, open the folder you select
 2. Open `https://gemini.google.com/app`.
 3. Send a normal Gemini message.
 4. Click `Branch` below the latest Gemini response.
-5. If automatic share-link extraction fails, manually create/copy Gemini's public share link and paste it into the prompt shown by the extension.
+5. Wait while the extension creates and reads Gemini's public share link automatically.
 6. Type in the branch panel on the original page.
 7. Use `Open` on a branch panel if you need to inspect the background branch tab.
 

@@ -6,6 +6,7 @@ The extension can still access sensitive data because it runs on Gemini Web page
 
 - It can read visible Gemini conversation text.
 - It can create Gemini public share links when the user clicks Branch.
+- It can read the clipboard to detect a Gemini public share link copied by Gemini's share UI.
 - It stores branch metadata and recent mirrored output in `chrome.storage.local`.
 - It opens background Gemini tabs to continue branch conversations.
 

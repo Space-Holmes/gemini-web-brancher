@@ -5,6 +5,8 @@
   const ROOT_ID = "gwb-branch-root";
   const BUTTON_ID = "gwb-branch-button";
   const RESPONSE_IDLE_MS = 3500;
+  const SHARE_LINK_TIMEOUT_MS = 30000;
+  const SHARE_DOM_FALLBACK_DELAY_MS = 8000;
   const SHARE_URL_PATTERN = /https:\/\/(?:g\.co\/gemini\/share\/|gemini\.google\.com\/share\/)[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]+/;
 
   const state = {
@@ -158,95 +160,126 @@
   }
 
   async function extractShareUrl() {
-    const existing = findShareUrlInDocument();
-    if (existing) {
-      return existing;
-    }
-
-    const shareButton = findButtonByTerms([
+    const shareButton = await waitForElement(() => findButtonByTerms([
       "share conversation",
       "share & export",
       "share and export",
       "share",
+      "share chat",
       "共享对话",
       "分享对话",
       "分享和导出",
       "分享"
-    ]);
+    ]), 8000).catch(() => null);
     if (!shareButton) {
       throw new Error("Could not find Gemini share button.");
     }
 
     shareButton.click();
-    await sleep(900);
+    await sleep(700);
 
     const shareConversation = findButtonByTerms([
       "share conversation",
+      "share this chat",
+      "share chat",
       "共享对话",
       "分享对话"
     ]);
     if (shareConversation && shareConversation !== shareButton) {
       shareConversation.click();
-      await sleep(900);
+      await sleep(700);
     }
 
-    const createLink = findButtonByTerms([
-      "create public link",
-      "create link",
-      "public link",
-      "创建公开链接",
-      "创建链接",
-      "公开链接"
-    ]);
-    if (createLink) {
-      createLink.click();
-      await sleep(1400);
-    }
-
-    let shareUrl = findShareUrlInDocument();
+    const shareUrl = await waitForGeneratedShareUrl(SHARE_LINK_TIMEOUT_MS);
     if (shareUrl) {
       closeAnyDialog();
       return shareUrl;
     }
 
-    const copyButton = findButtonByTerms([
-      "copy public link",
-      "copy link",
-      "copy",
-      "复制公开链接",
-      "复制链接",
-      "复制"
-    ]);
-    if (copyButton) {
-      copyButton.click();
+    throw new Error("Gemini did not expose a share link. Try opening the share panel once, then click Branch again.");
+  }
+
+  async function waitForGeneratedShareUrl(timeoutMs) {
+    const startedAt = Date.now();
+    let clickedCreate = false;
+    let lastCopyClickAt = 0;
+    let domFallbackUrl = "";
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const surface = getShareSurface();
+
+      const createLink = findButtonByTermsIn(surface, [
+        "create public link",
+        "create link",
+        "generate public link",
+        "generate link",
+        "get link",
+        "public link",
+        "创建公开链接",
+        "创建公共链接",
+        "创建链接",
+        "生成公开链接",
+        "生成链接",
+        "获取链接",
+        "公开链接"
+      ]);
+      if (!clickedCreate && createLink && isEnabled(createLink)) {
+        setStatus("Generating Gemini share link...");
+        createLink.click();
+        clickedCreate = true;
+        await sleep(1000);
+        continue;
+      }
+
+      const copyButton = findButtonByTermsIn(surface, [
+        "copy public link",
+        "copy link",
+        "copy url",
+        "copy",
+        "复制公开链接",
+        "复制公共链接",
+        "复制链接",
+        "复制"
+      ]);
+      if (copyButton && isEnabled(copyButton) && Date.now() - lastCopyClickAt > 2500) {
+        setStatus("Copying Gemini share link...");
+        copyButton.click();
+        lastCopyClickAt = Date.now();
+        await sleep(650);
+        const clipboardUrl = await readClipboardShareUrl();
+        if (clipboardUrl) {
+          return clipboardUrl;
+        }
+        continue;
+      }
+
+      const shareUrl = findShareUrlInDocument(surface);
+      if (shareUrl) {
+        domFallbackUrl = shareUrl;
+        if (Date.now() - startedAt > SHARE_DOM_FALLBACK_DELAY_MS) {
+          setStatus("Using generated Gemini share link...");
+          return shareUrl;
+        }
+      }
+
       await sleep(500);
     }
 
-    shareUrl = findShareUrlInDocument();
-    if (shareUrl) {
-      closeAnyDialog();
-      return shareUrl;
+    return domFallbackUrl;
+  }
+
+  async function readClipboardShareUrl() {
+    if (!navigator.clipboard || !navigator.clipboard.readText) {
+      return "";
     }
 
     try {
       const clipboard = await navigator.clipboard.readText();
-      const match = SHARE_URL_PATTERN.exec(clipboard);
-      if (match) {
-        closeAnyDialog();
-        return match[0];
-      }
+      const match = SHARE_URL_PATTERN.exec(clipboard || "");
+      return match ? match[0].replace(/[).,，。]+$/, "") : "";
     } catch {
-      // Clipboard read can be blocked. DOM extraction above is the primary path.
+      return "";
     }
-
-    const pasted = window.prompt("Paste the Gemini public share link to create a branch:");
-    const match = SHARE_URL_PATTERN.exec(pasted || "");
-    if (match) {
-      closeAnyDialog();
-      return match[0].replace(/[).,，。]+$/, "");
-    }
-
-    throw new Error("Share link was not created or copied.");
   }
 
   function renderBranches() {
@@ -443,9 +476,9 @@
     return anchor.closest("model-response, [data-test-id*='response' i], [data-testid*='response' i], .model-response, article") || anchor;
   }
 
-  function findShareUrlInDocument() {
+  function findShareUrlInDocument(root = document) {
     const candidates = [];
-    for (const element of document.querySelectorAll("a[href], input, textarea")) {
+    for (const element of root.querySelectorAll("a[href], input, textarea")) {
       if (element instanceof HTMLAnchorElement) {
         candidates.push(element.href || "");
       } else {
@@ -453,11 +486,13 @@
       }
     }
 
-    const dialog = document.querySelector("[role='dialog'], mat-dialog-container, .cdk-overlay-pane");
+    const dialog = root === document ? getShareSurface() : root;
     if (dialog) {
       candidates.push(dialog.innerText || dialog.textContent || "");
     }
-    candidates.push(document.body.innerText || "");
+    if (root === document) {
+      candidates.push(document.body.innerText || "");
+    }
 
     for (const value of candidates) {
       const match = SHARE_URL_PATTERN.exec(value);
@@ -469,8 +504,12 @@
   }
 
   function findButtonByTerms(terms) {
+    return findButtonByTermsIn(document, terms);
+  }
+
+  function findButtonByTermsIn(root, terms) {
     const normalizedTerms = terms.map((term) => term.toLowerCase());
-    const candidates = Array.from(document.querySelectorAll("button, [role='button'], a, div[aria-label], span[aria-label]"))
+    const candidates = Array.from(root.querySelectorAll("button, [role='button'], a, div[aria-label], span[aria-label]"))
       .filter(isVisible)
       .filter((element) => !element.closest(`#${ROOT_ID}`));
 
@@ -488,6 +527,10 @@
         .toLowerCase();
       return normalizedTerms.some((term) => text.includes(term));
     }) || null;
+  }
+
+  function getShareSurface() {
+    return document.querySelector("[role='dialog'], mat-dialog-container, .cdk-overlay-pane, .cdk-overlay-container") || document;
   }
 
   async function waitForComposer(timeoutMs) {
@@ -567,6 +610,15 @@
         ].filter(Boolean).join(" ").toLowerCase();
         return normalizedTerms.some((term) => text.includes(term));
       }) || null;
+  }
+
+  function isEnabled(element) {
+    return Boolean(
+      element &&
+      !element.disabled &&
+      element.getAttribute("aria-disabled") !== "true" &&
+      !element.hasAttribute("disabled")
+    );
   }
 
   function findIconSendButton(root) {

@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "Adds branch-style side conversations to Gemini Web by mirroring hidden branch tabs created from share links.",
   "permissions": [
+    "clipboardRead",
     "storage",
     "tabs"
   ],

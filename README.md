@@ -12,7 +12,7 @@
 - 创建后台非激活 tab 作为 branch 会话。
 - 在原页面每个 branch 面板里输入 prompt，并转发到对应后台 tab。
 - 从后台 tab 监听最新 Gemini 回复文本，并同步显示到原页面。
-- 自动提取分享链接失败时，允许手动粘贴分享链接作为 fallback。
+- Branch 会持续等待 Gemini 生成分享链接，并自动完成链接提取。
 - 可从 branch 面板或扩展弹窗打开后台 branch tab 进行人工排查。
 
 ## 重要限制
@@ -22,6 +22,7 @@
 3. Chrome 扩展无法真正运行一个完全不可见的 Gemini 页面。MVP 使用非激活后台 tab，用户仍然可以在浏览器 tab 列表里看到它。
 4. Workspace 管理员、账号类型、地区、年龄或 Gemini 产品限制都可能阻止分享或继续聊天。
 5. 当前只面向文字对话。文件、图片、Canvas、Deep Research 等复杂上下文没有保证。
+6. 扩展声明了 `clipboardRead` 权限，用于自动读取 Gemini 复制出的分享链接。
 
 ## 本地安装
 

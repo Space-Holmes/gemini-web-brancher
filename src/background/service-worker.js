@@ -103,7 +103,11 @@ async function handleContentReady(message, sender) {
 
   return {
     role: "parent",
-    branches: branchesForParentConversation(state, tabId, message.parentConversationKey || conversationKeyFromUrl(message.url))
+    branches: await registerParentTabForConversation(
+      state,
+      tabId,
+      message.parentConversationKey || conversationKeyFromUrl(message.url)
+    )
   };
 }
 
@@ -111,7 +115,11 @@ async function handleListBranches(message, sender) {
   const parentTabId = requireSenderTab(sender);
   const state = await loadState();
   return {
-    branches: branchesForParentConversation(state, parentTabId, message.parentConversationKey || conversationKeyFromUrl(message.url))
+    branches: await registerParentTabForConversation(
+      state,
+      parentTabId,
+      message.parentConversationKey || conversationKeyFromUrl(message.url)
+    )
   };
 }
 
@@ -122,7 +130,7 @@ async function handleCreateBranch(message, sender) {
   const state = await loadState();
   const parentUrl = message.parentUrl || parentTab.url || "";
   const parentConversationKey = message.parentConversationKey || conversationKeyFromUrl(parentUrl);
-  const branchNumber = nextBranchNumber(state, parentTabId, parentConversationKey);
+  const branchNumber = nextBranchNumber(state, parentConversationKey);
   const branchSuffix = `_branch${branchNumber}`;
   const { branchWindow, branchTab, workerMode } = await createBranchWorker(parentTab);
 
@@ -130,6 +138,7 @@ async function handleCreateBranch(message, sender) {
   const branch = {
     id: createId(),
     parentTabId,
+    parentTabIds: [parentTabId],
     parentUrl,
     parentTitle: message.parentTitle || parentTab.title || "",
     parentConversationKey,
@@ -472,17 +481,24 @@ function updateBranchTurn(branch, turnId, patch) {
 }
 
 async function notifyParent(branch, payload) {
-  if (!branch || !Number.isInteger(branch.parentTabId)) {
+  if (!branch) {
     return;
   }
 
-  try {
-    await chrome.tabs.sendMessage(branch.parentTabId, {
-      source: SOURCE,
-      ...payload
-    });
-  } catch (error) {
-    console.warn("[Gemini Web Brancher] Parent tab not reachable", error);
+  const parentTabIds = branchParentTabIds(branch);
+  if (!parentTabIds.length) {
+    return;
+  }
+
+  for (const parentTabId of parentTabIds) {
+    try {
+      await chrome.tabs.sendMessage(parentTabId, {
+        source: SOURCE,
+        ...payload
+      });
+    } catch (error) {
+      console.warn("[Gemini Web Brancher] Parent tab not reachable", error);
+    }
   }
 }
 
@@ -492,22 +508,49 @@ function findBranchByTabId(state, tabId) {
 
 function branchesForParentTab(state, parentTabId) {
   return Object.values(state.branches)
-    .filter((branch) => branch.parentTabId === parentTabId)
+    .filter((branch) => branchParentTabIds(branch).includes(parentTabId))
     .sort((a, b) => a.createdAt - b.createdAt);
 }
 
-function branchesForParentConversation(state, parentTabId, parentConversationKey, options = {}) {
-  return branchesForParentTab(state, parentTabId)
-    .filter((branch) => branchConversationKey(branch) === parentConversationKey)
-    .filter((branch) => options.includeClosed || branch.status !== "closed");
+async function registerParentTabForConversation(state, parentTabId, parentConversationKey) {
+  const branches = branchesForParentConversation(state, parentConversationKey);
+  let changed = false;
+  for (const branch of branches) {
+    const parentTabIds = branchParentTabIds(branch);
+    if (!parentTabIds.includes(parentTabId)) {
+      branch.parentTabIds = [...parentTabIds, parentTabId];
+      branch.parentTabId = parentTabId;
+      branch.updatedAt = Date.now();
+      changed = true;
+    }
+  }
+  if (changed) {
+    await saveState(state);
+  }
+  return branches;
 }
 
-function nextBranchNumber(state, parentTabId, parentConversationKey) {
-  const existing = branchesForParentConversation(state, parentTabId, parentConversationKey, {
+function branchesForParentConversation(state, parentConversationKey, options = {}) {
+  return Object.values(state.branches)
+    .filter((branch) => branchConversationKey(branch) === parentConversationKey)
+    .filter((branch) => options.includeClosed || branch.status !== "closed")
+    .sort((a, b) => a.createdAt - b.createdAt);
+}
+
+function nextBranchNumber(state, parentConversationKey) {
+  const existing = branchesForParentConversation(state, parentConversationKey, {
     includeClosed: true
   })
     .map((branch) => Number(branch.branchNumber) || 0);
   return existing.length ? Math.max(...existing) + 1 : 1;
+}
+
+function branchParentTabIds(branch) {
+  const ids = Array.isArray(branch.parentTabIds) ? [...branch.parentTabIds] : [];
+  if (Number.isInteger(branch.parentTabId)) {
+    ids.push(branch.parentTabId);
+  }
+  return Array.from(new Set(ids.filter(Number.isInteger)));
 }
 
 function branchConversationKey(branch) {

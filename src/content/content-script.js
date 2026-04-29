@@ -817,6 +817,11 @@
   }
 
   async function openRenameActionMenu() {
+    const latestAction = await openLatestConversationActionMenu();
+    if (latestAction) {
+      return latestAction;
+    }
+
     const opener = await waitForRenameMenuOpener(9000);
     if (opener && !state.branchRenameCancelled) {
       activateElement(opener);
@@ -843,6 +848,70 @@
     }
 
     return null;
+  }
+
+  async function openLatestConversationActionMenu() {
+    const containers = findLatestConversationContainers();
+    for (const container of containers) {
+      if (state.branchRenameCancelled) {
+        return null;
+      }
+
+      revealElementControls(container);
+      await sleep(180);
+      const menuButton = findConversationMenuButton(container);
+      if (menuButton) {
+        activateElement(menuButton);
+        const renameAction = await waitForElement(() => findRenameAction(), 2200).catch(() => null);
+        if (renameAction) {
+          return renameAction;
+        }
+        closeAnyDialog();
+        await sleep(250);
+      }
+
+      dispatchContextMenu(container);
+      const contextRenameAction = await waitForElement(() => findRenameAction(), 1600).catch(() => null);
+      if (contextRenameAction) {
+        return contextRenameAction;
+      }
+      closeAnyDialog();
+      await sleep(250);
+    }
+
+    return null;
+  }
+
+  function findLatestConversationContainers() {
+    const anchors = queryAllDeep(document, "aside a[href], nav a[href], [role='navigation'] a[href], a[href*='/app/']")
+      .filter((anchor) => anchor instanceof HTMLAnchorElement)
+      .filter(isVisible)
+      .filter((anchor) => !anchor.closest(`#${ROOT_ID}`))
+      .filter(isConversationAnchor)
+      .map((anchor) => anchor.closest("[role='listitem'], li, mat-list-item, [data-test-id], [data-testid], .conversation, .chat, .history") || anchor)
+      .filter((container) => !isPinnedConversationContainer(container))
+      .filter((container) => isLikelyConversationTitle(getElementVisibleLabel(container)));
+
+    return uniqueElements(anchors)
+      .filter((element) => element instanceof Element)
+      .slice(0, 8);
+  }
+
+  function isConversationAnchor(anchor) {
+    try {
+      const url = new URL(anchor.href, location.href);
+      return (
+        url.hostname === "gemini.google.com" &&
+        /^\/app\/[^/]+\/?$/.test(url.pathname)
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function isPinnedConversationContainer(container) {
+    const label = getElementVisibleLabel(container).toLowerCase();
+    return /pinned|已固定|取消固定|unpin/.test(label);
   }
 
   async function waitForRenameMenuOpener(timeoutMs) {

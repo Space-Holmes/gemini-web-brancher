@@ -631,34 +631,27 @@
       "continue",
       "open in gemini",
       "open gemini",
-      "try gemini",
-      "use gemini",
-      "start chatting",
-      "start chat",
-      "start a chat",
-      "chat with gemini",
-      "ask gemini",
-      "gemini app",
       "继续此聊天",
       "继续这个聊天",
       "继续聊天",
       "继续对话",
       "在 gemini 中继续",
-      "打开 gemini",
-      "使用 gemini",
-      "试用 gemini",
-      "开始聊天",
-      "开始对话",
-      "与 gemini 聊天"
+      "继续"
     ];
     const normalizedTerms = terms.map((term) => term.toLowerCase());
-    const candidates = Array.from(document.querySelectorAll("a[href], button, [role='button'], div[aria-label], span[aria-label]"))
+    const candidates = queryAllDeep(document, "a[href], button, [role='button'], div[aria-label], span[aria-label], div, span")
+      .map(toClickableCandidate)
+      .filter(Boolean)
+      .filter((element, index, elements) => elements.indexOf(element) === index)
       .filter((element) => !element.closest(`#${ROOT_ID}`))
       .filter((element) => isVisible(element) || element instanceof HTMLAnchorElement)
       .filter(isEnabled);
 
     const textMatch = candidates.find((element) => {
-      const label = getElementLabel(element).toLowerCase();
+      if (isAccountOrChromeEntry(element)) {
+        return false;
+      }
+      const label = getElementVisibleLabel(element).toLowerCase();
       return normalizedTerms.some((term) => label.includes(term));
     });
     if (textMatch) {
@@ -672,11 +665,31 @@
       }
       try {
         const url = new URL(href);
-        return url.hostname === "gemini.google.com" && url.pathname.startsWith("/app") && !url.pathname.startsWith("/share");
+        const label = getElementVisibleLabel(element).toLowerCase();
+        return (
+          url.hostname === "gemini.google.com" &&
+          url.pathname.startsWith("/app") &&
+          !url.pathname.startsWith("/share") &&
+          normalizedTerms.some((term) => label.includes(term))
+        );
       } catch {
         return false;
       }
     }) || null;
+  }
+
+  function toClickableCandidate(element) {
+    if (!element || !(element instanceof Element)) {
+      return null;
+    }
+    if (element.matches("a[href], button, [role='button']")) {
+      return element;
+    }
+    const label = getElementVisibleLabel(element).toLowerCase();
+    if (!label.includes("continue") && !label.includes("继续")) {
+      return null;
+    }
+    return element.closest("a[href], button, [role='button'], [tabindex], [jsaction], [data-action]") || element;
   }
 
   function activateElement(element) {
@@ -702,14 +715,33 @@
       .trim();
   }
 
-  function buildComposerTimeoutMessage(lastClickedText) {
-    const candidates = Array.from(document.querySelectorAll("a[href], button, [role='button']"))
-      .filter((element) => !element.closest(`#${ROOT_ID}`))
-      .filter((element) => isVisible(element) || element instanceof HTMLAnchorElement)
-      .map(getElementLabel)
+  function getElementVisibleLabel(element) {
+    return [
+      element.getAttribute("aria-label"),
+      element.getAttribute("title"),
+      element.getAttribute("data-tooltip"),
+      element.innerText,
+      element.textContent
+    ]
       .filter(Boolean)
-      .slice(0, 8)
-      .join(" | ");
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function isAccountOrChromeEntry(element) {
+    const label = getElementVisibleLabel(element).toLowerCase();
+    const href = element instanceof HTMLAnchorElement ? element.href.toLowerCase() : "";
+    return (
+      href.includes("accounts.google.com") ||
+      label.includes("google 账号") ||
+      label.includes("google account") ||
+      label.includes("@gmail.com")
+    );
+  }
+
+  function buildComposerTimeoutMessage(lastClickedText) {
+    const candidates = collectVisibleActions();
     return [
       "Timed out waiting for Gemini composer.",
       `URL: ${location.href}`,
@@ -717,6 +749,16 @@
       lastClickedText ? `Last clicked: ${lastClickedText}` : "",
       candidates ? `Visible actions: ${candidates}` : "Visible actions: none detected"
     ].filter(Boolean).join("\n");
+  }
+
+  function collectVisibleActions() {
+    return Array.from(document.querySelectorAll("a[href], button, [role='button']"))
+      .filter((element) => !element.closest(`#${ROOT_ID}`))
+      .filter((element) => isVisible(element) || element instanceof HTMLAnchorElement)
+      .map(getElementLabel)
+      .filter(Boolean)
+      .slice(0, 8)
+      .join(" | ");
   }
 
   async function waitForComposer(timeoutMs) {

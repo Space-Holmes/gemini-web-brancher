@@ -59,8 +59,7 @@
   async function runBranchTab() {
     installRuntimeListener();
     await sleep(1200);
-    await continueSharedChatIfNeeded();
-    await waitForComposer(45000);
+    await prepareBranchComposer(60000);
     await sendRuntime("GWB_BRANCH_READY", {
       branchId: state.branchMeta.id,
       url: location.href
@@ -408,26 +407,30 @@
     renderBranches();
   }
 
-  async function continueSharedChatIfNeeded() {
-    const button = await waitForElement(() => findButtonByTerms([
-      "continue this chat",
-      "continue this conversation",
-      "continue in gemini",
-      "continue chat",
-      "continue conversation",
-      "continue",
-      "open in gemini",
-      "继续此聊天",
-      "继续这个聊天",
-      "继续聊天",
-      "继续对话",
-      "在 gemini 中继续"
-    ]), 18000).catch(() => null);
+  async function prepareBranchComposer(timeoutMs) {
+    const startedAt = Date.now();
+    let lastClickAt = 0;
+    let lastClickedText = "";
 
-    if (button) {
-      button.click();
-      await sleep(3000);
+    while (Date.now() - startedAt < timeoutMs) {
+      const composer = findComposer();
+      if (composer) {
+        return composer;
+      }
+
+      const entry = findContinueEntry();
+      if (entry && Date.now() - lastClickAt > 3500) {
+        lastClickAt = Date.now();
+        lastClickedText = getElementLabel(entry).slice(0, 120);
+        activateElement(entry);
+        await sleep(3500);
+        continue;
+      }
+
+      await sleep(700);
     }
+
+    throw new Error(buildComposerTimeoutMessage(lastClickedText));
   }
 
   async function submitPromptToGemini(prompt) {
@@ -573,6 +576,106 @@
 
   function getShareSurface() {
     return document.querySelector("[role='dialog'], mat-dialog-container, .cdk-overlay-pane, .cdk-overlay-container") || document;
+  }
+
+  function findContinueEntry() {
+    const terms = [
+      "continue this chat",
+      "continue this conversation",
+      "continue in gemini",
+      "continue with gemini",
+      "continue in the gemini app",
+      "continue chat",
+      "continue conversation",
+      "continue",
+      "open in gemini",
+      "open gemini",
+      "try gemini",
+      "use gemini",
+      "start chatting",
+      "start chat",
+      "start a chat",
+      "chat with gemini",
+      "ask gemini",
+      "gemini app",
+      "继续此聊天",
+      "继续这个聊天",
+      "继续聊天",
+      "继续对话",
+      "在 gemini 中继续",
+      "打开 gemini",
+      "使用 gemini",
+      "试用 gemini",
+      "开始聊天",
+      "开始对话",
+      "与 gemini 聊天"
+    ];
+    const normalizedTerms = terms.map((term) => term.toLowerCase());
+    const candidates = Array.from(document.querySelectorAll("a[href], button, [role='button'], div[aria-label], span[aria-label]"))
+      .filter((element) => !element.closest(`#${ROOT_ID}`))
+      .filter((element) => isVisible(element) || element instanceof HTMLAnchorElement)
+      .filter(isEnabled);
+
+    const textMatch = candidates.find((element) => {
+      const label = getElementLabel(element).toLowerCase();
+      return normalizedTerms.some((term) => label.includes(term));
+    });
+    if (textMatch) {
+      return textMatch;
+    }
+
+    return candidates.find((element) => {
+      const href = element instanceof HTMLAnchorElement ? element.href : "";
+      if (!href) {
+        return false;
+      }
+      try {
+        const url = new URL(href);
+        return url.hostname === "gemini.google.com" && url.pathname.startsWith("/app") && !url.pathname.startsWith("/share");
+      } catch {
+        return false;
+      }
+    }) || null;
+  }
+
+  function activateElement(element) {
+    if (element instanceof HTMLAnchorElement && element.href) {
+      element.click();
+      return;
+    }
+    element.click();
+  }
+
+  function getElementLabel(element) {
+    return [
+      element.getAttribute("aria-label"),
+      element.getAttribute("title"),
+      element.getAttribute("data-tooltip"),
+      element instanceof HTMLAnchorElement ? element.href : "",
+      element.innerText,
+      element.textContent
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function buildComposerTimeoutMessage(lastClickedText) {
+    const candidates = Array.from(document.querySelectorAll("a[href], button, [role='button']"))
+      .filter((element) => !element.closest(`#${ROOT_ID}`))
+      .filter((element) => isVisible(element) || element instanceof HTMLAnchorElement)
+      .map(getElementLabel)
+      .filter(Boolean)
+      .slice(0, 8)
+      .join(" | ");
+    return [
+      "Timed out waiting for Gemini composer.",
+      `URL: ${location.href}`,
+      `Title: ${document.title || "(none)"}`,
+      lastClickedText ? `Last clicked: ${lastClickedText}` : "",
+      candidates ? `Visible actions: ${candidates}` : "Visible actions: none detected"
+    ].filter(Boolean).join("\n");
   }
 
   async function waitForComposer(timeoutMs) {

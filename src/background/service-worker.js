@@ -121,7 +121,7 @@ async function handleCreateBranch(message, sender) {
   const parentConversationKey = message.parentConversationKey || conversationKeyFromUrl(parentUrl);
   const branchNumber = nextBranchNumber(state, parentTabId, parentConversationKey);
   const branchSuffix = `_branch${branchNumber}`;
-  const { branchWindow, branchTab, workerMode } = await createBranchWorker(shareUrl, parentTab);
+  const { branchWindow, branchTab, workerMode } = await createBranchWorker(parentTab);
 
   const now = Date.now();
   const branch = {
@@ -133,7 +133,7 @@ async function handleCreateBranch(message, sender) {
     branchNumber,
     branchSuffix,
     shareUrl,
-    branchUrl: branchTab.url || shareUrl,
+    branchUrl: shareUrl,
     tabId: branchTab.id,
     windowId: branchWindow ? branchWindow.id : null,
     workerMode,
@@ -148,6 +148,7 @@ async function handleCreateBranch(message, sender) {
 
   state.branches[branch.id] = branch;
   await saveState(state);
+  await navigateBranchWorker(branch, shareUrl);
   await notifyParent(branch, {
     type: "GWB_BRANCH_STATE",
     branch
@@ -209,6 +210,7 @@ async function handleSendPrompt(message) {
     source: SOURCE,
     type: "GWB_BRANCH_SUBMIT_PROMPT",
     branchId: branch.id,
+    branch,
     turnId,
     prompt
   });
@@ -493,10 +495,10 @@ function conversationKeyFromUrl(url) {
   }
 }
 
-async function createBranchWorker(shareUrl, parentTab) {
+async function createBranchWorker(parentTab) {
   try {
     const branchWindow = await chrome.windows.create({
-      url: shareUrl,
+      url: "about:blank",
       type: "normal",
       focused: false,
       width: 980,
@@ -514,7 +516,7 @@ async function createBranchWorker(shareUrl, parentTab) {
   }
 
   const tabCreateOptions = {
-    url: shareUrl,
+    url: "about:blank",
     active: false
   };
   if (parentTab && Number.isInteger(parentTab.windowId)) {
@@ -527,6 +529,16 @@ async function createBranchWorker(shareUrl, parentTab) {
     branchTab,
     workerMode: "background-tab-fallback"
   };
+}
+
+async function navigateBranchWorker(branch, url) {
+  if (!branch || !Number.isInteger(branch.tabId)) {
+    throw new Error("Branch worker is not ready to navigate.");
+  }
+
+  await chrome.tabs.update(branch.tabId, {
+    url
+  });
 }
 
 async function keepBranchTabAlive(branchTab) {

@@ -45,11 +45,7 @@
     state.parentConversationKey = getParentConversationKey(location.href);
     state.parentUrl = location.href;
 
-    const ready = await sendRuntime("GWB_CONTENT_READY", {
-      url: location.href,
-      title: document.title,
-      parentConversationKey: state.parentConversationKey
-    });
+    const ready = await resolveInitialRole();
 
     state.role = ready.role;
     if (ready.role === "branch") {
@@ -62,6 +58,34 @@
       state.branches.set(branch.id, branch);
     }
     runParentTab();
+  }
+
+  async function resolveInitialRole() {
+    let ready = await announceContentReady();
+    if (ready.role === "branch" || !isBranchWorkerCandidateUrl(location.href)) {
+      return ready;
+    }
+
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await sleep(250);
+      ready = await announceContentReady();
+      if (ready.role === "branch") {
+        return ready;
+      }
+    }
+    return ready;
+  }
+
+  function announceContentReady() {
+    return sendRuntime("GWB_CONTENT_READY", {
+      url: location.href,
+      title: document.title,
+      parentConversationKey: state.parentConversationKey
+    });
+  }
+
+  function isBranchWorkerCandidateUrl(url) {
+    return isGeminiSharePageUrl(url) || isGeminiAppSharePageUrl(url);
   }
 
   function runParentTab() {
@@ -167,6 +191,9 @@
       }
 
       if (message.type === "GWB_BRANCH_SUBMIT_PROMPT") {
+        enterBranchMode(message.branch || {
+          id: message.branchId
+        });
         submitPromptToGemini(message.prompt, message.turnId)
           .then(() => sendResponse({ ok: true }))
           .catch((error) => {
@@ -181,6 +208,23 @@
 
       return false;
     });
+  }
+
+  function enterBranchMode(branch) {
+    if (branch && branch.id) {
+      state.branchMeta = branch;
+    }
+    if (state.role === "branch") {
+      return;
+    }
+
+    state.role = "branch";
+    if (state.attachObserver) {
+      state.attachObserver.disconnect();
+      state.attachObserver = null;
+    }
+    detachParentUi();
+    state.branches.clear();
   }
 
   function attachParentUi() {
@@ -1244,9 +1288,9 @@
       ".markdown"
     ];
 
-    const candidates = uniqueElements(selectors.flatMap((selector) => Array.from(document.querySelectorAll(selector))))
+    const candidates = uniqueElements(selectors.flatMap((selector) => queryAllDeep(document, selector)))
       .filter((element) => element.id !== ROOT_ID && !element.closest(`#${ROOT_ID}`))
-      .filter(isVisible)
+      .filter((element) => state.role === "branch" || isVisible(element))
       .filter((element) => normalizeText(element.innerText || element.textContent || "").length > 24);
 
     return candidates[candidates.length - 1] || null;
@@ -1809,6 +1853,27 @@
       return `url:${parsed.origin}${parsed.pathname}${parsed.search}`;
     } catch {
       return `url:${String(url || "").split("#")[0]}`;
+    }
+  }
+
+  function isGeminiSharePageUrl(url) {
+    try {
+      const parsed = new URL(String(url || ""), location.href);
+      return (
+        (parsed.hostname === "g.co" && parsed.pathname.startsWith("/gemini/share/")) ||
+        (parsed.hostname === "gemini.google.com" && parsed.pathname.startsWith("/share/"))
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function isGeminiAppSharePageUrl(url) {
+    try {
+      const parsed = new URL(String(url || ""), location.href);
+      return parsed.hostname === "gemini.google.com" && /^\/app\/[A-Za-z0-9_-]+\/share\//.test(parsed.pathname);
+    } catch {
+      return false;
     }
   }
 

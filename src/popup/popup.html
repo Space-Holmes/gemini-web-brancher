@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Gemini Web Brancher</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="popup">
+      <header class="header">
+        <h1>Gemini Web Brancher</h1>
+        <button id="refresh" type="button" title="Refresh">Refresh</button>
+      </header>
+
+      <section class="notice">
+        Branches are backed by Gemini public share links and background tabs.
+      </section>
+
+      <section>
+        <h2>Branches</h2>
+        <div id="branches" class="branches"></div>
+      </section>
+
+      <footer class="footer">
+        <button id="clear-closed" type="button">Clear closed</button>
+      </footer>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

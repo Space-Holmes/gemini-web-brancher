@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "Gemini Web Brancher",
+  "version": "0.1.0",
+  "description": "Adds branch-style side conversations to Gemini Web by mirroring hidden branch tabs created from share links.",
+  "permissions": [
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://gemini.google.com/*",
+    "https://g.co/gemini/*"
+  ],
+  "background": {
+    "service_worker": "src/background/service-worker.js"
+  },
+  "action": {
+    "default_title": "Gemini Web Brancher",
+    "default_popup": "src/popup/popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://gemini.google.com/*",
+        "https://g.co/gemini/*"
+      ],
+      "js": [
+        "src/content/content-script.js"
+      ],
+      "css": [
+        "src/content/styles.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

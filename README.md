@@ -1,0 +1,67 @@
+# Gemini Web Brancher
+
+一个 Chrome MV3 扩展原型：在 Gemini Web 的最新回复下插入 `Branch` 按钮，点击后用 Gemini 的分享链接创建一个后台分支 tab，并把这个分支 tab 的输入和输出镜像回当前页面。
+
+> 当前项目不调用 Gemini 可能存在的原生 branch 功能。MVP 只走「分享链接 + 后台 tab + 页面镜像」方案。
+
+## 当前状态
+
+- 可直接作为「加载已解压的扩展」安装。
+- 支持在 `https://gemini.google.com/*` 注入 Branch UI。
+- 点击 Branch 后自动尝试打开 Gemini 分享面板、创建/复制分享链接。
+- 创建后台非激活 tab 作为 branch 会话。
+- 在原页面每个 branch 面板里输入 prompt，并转发到对应后台 tab。
+- 从后台 tab 监听最新 Gemini 回复文本，并同步显示到原页面。
+- 自动提取分享链接失败时，允许手动粘贴分享链接作为 fallback。
+- 可从 branch 面板或扩展弹窗打开后台 branch tab 进行人工排查。
+
+## 重要限制
+
+1. Gemini 的分享链接是公开链接。这个扩展会为了创建分支而触发公开分享链接，敏感内容不要使用。
+2. Gemini Web 没有公开稳定的页面自动化 API，按钮文案和 DOM 改版都会影响成功率。
+3. Chrome 扩展无法真正运行一个完全不可见的 Gemini 页面。MVP 使用非激活后台 tab，用户仍然可以在浏览器 tab 列表里看到它。
+4. Workspace 管理员、账号类型、地区、年龄或 Gemini 产品限制都可能阻止分享或继续聊天。
+5. 当前只面向文字对话。文件、图片、Canvas、Deep Research 等复杂上下文没有保证。
+
+## 本地安装
+
+1. 打开 Chrome: `chrome://extensions`
+2. 开启 Developer mode
+3. 选择 Load unpacked
+4. 选择本项目根目录
+5. 打开 `https://gemini.google.com/app` 并开始一段对话
+
+## 开发命令
+
+```bash
+npm run validate
+npm run package
+```
+
+`npm run package` 会生成 `dist/gemini-web-brancher.zip`。
+
+## 架构
+
+- `src/content/content-script.js`
+  - 注入 Gemini 页面 UI
+  - 自动提取分享链接
+  - 在 branch tab 中自动点击继续聊天
+  - 在 branch tab 中提交 prompt 并监听回复
+- `src/background/service-worker.js`
+  - 管理 branch 状态
+  - 创建后台 tab
+  - 在 parent tab 和 branch tab 之间转发消息
+- `src/popup/*`
+  - 展示当前已创建 branch 和隐私提示
+
+## 路线图
+
+- 更强的 Gemini DOM selector 适配。
+- 手动粘贴分享链接 fallback。
+- branch tab 自动命名和一键关闭。
+- 更准确的流式输出结束检测。
+- 支持导出 branch 树。
+
+## 隐私
+
+见 [docs/PRIVACY.md](docs/PRIVACY.md)。

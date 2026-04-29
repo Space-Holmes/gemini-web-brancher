@@ -1,0 +1,18 @@
+{
+  "name": "gemini-web-brancher",
+  "version": "0.1.0",
+  "description": "Chrome extension prototype that adds branch-style conversations to Gemini Web.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "validate": "node scripts/validate-extension.mjs",
+    "package": "npm run validate && node scripts/package-extension.mjs"
+  },
+  "keywords": [
+    "chrome-extension",
+    "gemini",
+    "branch",
+    "mv3"
+  ],
+  "license": "MIT"
+}

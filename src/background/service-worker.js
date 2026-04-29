@@ -46,6 +46,9 @@ async function handleMessage(message, sender) {
     case "GWB_CREATE_BRANCH":
       return handleCreateBranch(message, sender);
 
+    case "GWB_LIST_BRANCHES":
+      return handleListBranches(message, sender);
+
     case "GWB_SEND_PROMPT":
       return handleSendPrompt(message, sender);
 
@@ -97,7 +100,15 @@ async function handleContentReady(message, sender) {
 
   return {
     role: "parent",
-    branches: branchesForParentTab(state, tabId)
+    branches: branchesForParentConversation(state, tabId, message.parentConversationKey || conversationKeyFromUrl(message.url))
+  };
+}
+
+async function handleListBranches(message, sender) {
+  const parentTabId = requireSenderTab(sender);
+  const state = await loadState();
+  return {
+    branches: branchesForParentConversation(state, parentTabId, message.parentConversationKey || conversationKeyFromUrl(message.url))
   };
 }
 
@@ -106,7 +117,9 @@ async function handleCreateBranch(message, sender) {
   const shareUrl = normalizeShareUrl(message.shareUrl);
   const parentTab = await chrome.tabs.get(parentTabId);
   const state = await loadState();
-  const branchNumber = nextBranchNumber(state, parentTabId);
+  const parentUrl = message.parentUrl || parentTab.url || "";
+  const parentConversationKey = message.parentConversationKey || conversationKeyFromUrl(parentUrl);
+  const branchNumber = nextBranchNumber(state, parentTabId, parentConversationKey);
   const branchSuffix = `_branch${branchNumber}`;
   const { branchWindow, branchTab } = await createBranchWorker(shareUrl);
 
@@ -114,8 +127,9 @@ async function handleCreateBranch(message, sender) {
   const branch = {
     id: createId(),
     parentTabId,
-    parentUrl: message.parentUrl || parentTab.url || "",
+    parentUrl,
     parentTitle: message.parentTitle || parentTab.title || "",
+    parentConversationKey,
     branchNumber,
     branchSuffix,
     shareUrl,
@@ -448,10 +462,35 @@ function branchesForParentTab(state, parentTabId) {
     .sort((a, b) => a.createdAt - b.createdAt);
 }
 
-function nextBranchNumber(state, parentTabId) {
-  const existing = branchesForParentTab(state, parentTabId)
+function branchesForParentConversation(state, parentTabId, parentConversationKey) {
+  return branchesForParentTab(state, parentTabId)
+    .filter((branch) => branchConversationKey(branch) === parentConversationKey);
+}
+
+function nextBranchNumber(state, parentTabId, parentConversationKey) {
+  const existing = branchesForParentConversation(state, parentTabId, parentConversationKey)
     .map((branch) => Number(branch.branchNumber) || 0);
   return existing.length ? Math.max(...existing) + 1 : 1;
+}
+
+function branchConversationKey(branch) {
+  return branch.parentConversationKey || conversationKeyFromUrl(branch.parentUrl);
+}
+
+function conversationKeyFromUrl(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    if (parsed.hostname === "gemini.google.com" && parsed.pathname.startsWith("/app/")) {
+      const [, app, conversationId] = parsed.pathname.split("/");
+      if (app === "app" && conversationId) {
+        return `app:${conversationId}`;
+      }
+    }
+    parsed.hash = "";
+    return `url:${parsed.origin}${parsed.pathname}${parsed.search}`;
+  } catch {
+    return `url:${String(url || "").split("#")[0]}`;
+  }
 }
 
 async function createBranchWorker(shareUrl) {

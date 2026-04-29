@@ -19,6 +19,9 @@
     statusText: null,
     attachObserver: null,
     lastAnchor: null,
+    parentConversationKey: "",
+    parentUrl: "",
+    branchListRequestToken: 0,
     branchOutputTimer: null,
     branchLastOutput: "",
     branchLastHtml: "",
@@ -32,9 +35,13 @@
   });
 
   async function init() {
+    state.parentConversationKey = getParentConversationKey(location.href);
+    state.parentUrl = location.href;
+
     const ready = await sendRuntime("GWB_CONTENT_READY", {
       url: location.href,
-      title: document.title
+      title: document.title,
+      parentConversationKey: state.parentConversationKey
     });
 
     state.role = ready.role;
@@ -52,12 +59,71 @@
 
   function runParentTab() {
     installRuntimeListener();
+    installParentLocationWatcher();
     attachParentUi();
     state.attachObserver = new MutationObserver(debounce(attachParentUi, 600));
     state.attachObserver.observe(document.documentElement, {
       childList: true,
       subtree: true
     });
+  }
+
+  function installParentLocationWatcher() {
+    const refresh = debounce(() => {
+      syncParentContextIfNeeded();
+      attachParentUi();
+    }, 120);
+
+    try {
+      for (const method of ["pushState", "replaceState"]) {
+        const original = history[method];
+        if (original && !original.__gwbWrapped) {
+          const wrapped = function (...args) {
+            const result = original.apply(this, args);
+            refresh();
+            return result;
+          };
+          wrapped.__gwbWrapped = true;
+          history[method] = wrapped;
+        }
+      }
+    } catch (error) {
+      console.warn("[Gemini Web Brancher] Could not watch Gemini history API", error);
+    }
+
+    window.addEventListener("popstate", refresh);
+    window.addEventListener("hashchange", refresh);
+  }
+
+  function syncParentContextIfNeeded() {
+    const nextUrl = location.href;
+    const nextKey = getParentConversationKey(nextUrl);
+    if (nextKey === state.parentConversationKey && nextUrl === state.parentUrl) {
+      return;
+    }
+
+    state.parentConversationKey = nextKey;
+    state.parentUrl = nextUrl;
+    state.lastAnchor = null;
+    renderBranches();
+    requestBranchesForCurrentConversation().catch((error) => {
+      console.warn("[Gemini Web Brancher] Could not refresh branches for conversation", error);
+    });
+  }
+
+  async function requestBranchesForCurrentConversation() {
+    const token = ++state.branchListRequestToken;
+    const result = await sendRuntime("GWB_LIST_BRANCHES", {
+      url: location.href,
+      parentConversationKey: state.parentConversationKey
+    });
+    if (token !== state.branchListRequestToken) {
+      return;
+    }
+    for (const branch of result.branches || []) {
+      state.branches.set(branch.id, branch);
+    }
+    renderBranches();
   }
 
   async function runBranchTab() {
@@ -113,8 +179,11 @@
       return;
     }
 
+    syncParentContextIfNeeded();
+
     const anchor = findLatestModelResponse();
     if (!anchor) {
+      detachParentUi();
       return;
     }
 
@@ -142,6 +211,13 @@
     renderBranches();
   }
 
+  function detachParentUi() {
+    if (state.root && state.root.isConnected) {
+      state.root.remove();
+    }
+    state.lastAnchor = null;
+  }
+
   async function createBranchFromCurrentChat(event) {
     const button = event.currentTarget;
     button.disabled = true;
@@ -153,7 +229,8 @@
       const result = await sendRuntime("GWB_CREATE_BRANCH", {
         shareUrl,
         parentUrl: location.href,
-        parentTitle: document.title
+        parentTitle: document.title,
+        parentConversationKey: state.parentConversationKey
       });
       upsertBranch(result.branch);
       setStatus("Branch worker opened. It will minimize when ready.");
@@ -305,7 +382,7 @@
       return;
     }
 
-    const branches = Array.from(state.branches.values()).sort((a, b) => a.createdAt - b.createdAt);
+    const branches = currentConversationBranches();
     const activeIds = new Set(branches.map((branch) => branch.id));
 
     branches.forEach((branch, index) => {
@@ -1431,8 +1508,35 @@
   }
 
   function branchLabel(branch) {
-    const index = Number(branch.branchNumber) || Array.from(state.branches.keys()).indexOf(branch.id) + 1;
+    const fallbackIndex = currentConversationBranches().findIndex((item) => item.id === branch.id);
+    const index = Number(branch.branchNumber) || (fallbackIndex >= 0 ? fallbackIndex + 1 : 1);
     return `Branch ${index}`;
+  }
+
+  function currentConversationBranches() {
+    return Array.from(state.branches.values())
+      .filter((branch) => branchParentConversationKey(branch) === state.parentConversationKey)
+      .sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  function branchParentConversationKey(branch) {
+    return branch.parentConversationKey || getParentConversationKey(branch.parentUrl || "");
+  }
+
+  function getParentConversationKey(url) {
+    try {
+      const parsed = new URL(String(url || ""), location.href);
+      if (parsed.hostname === "gemini.google.com" && parsed.pathname.startsWith("/app/")) {
+        const [, app, conversationId] = parsed.pathname.split("/");
+        if (app === "app" && conversationId) {
+          return `app:${conversationId}`;
+        }
+      }
+      parsed.hash = "";
+      return `url:${parsed.origin}${parsed.pathname}${parsed.search}`;
+    } catch {
+      return `url:${String(url || "").split("#")[0]}`;
+    }
   }
 
   function isVisible(element) {

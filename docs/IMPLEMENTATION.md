@@ -5,7 +5,7 @@
 1. Parent Gemini page inserts a Branch button near the latest model response.
 2. User clicks Branch.
 3. Parent content script opens Gemini's share UI and extracts a share URL.
-4. Background service worker creates a minimized popup worker window from that URL.
+4. Background service worker creates a popup worker window from that URL.
 5. Branch content script detects its branch metadata and clicks "Continue this chat".
 6. User writes prompts in the branch panel on the parent page.
 7. Background forwards prompts to the branch worker window.
@@ -14,9 +14,9 @@
 
 ## Why a minimized worker window
 
-Chrome MV3 offscreen documents cannot host a full cross-origin Gemini Web session and are intentionally limited. A minimized popup worker window is the most hidden extension-native MVP surface that can still run the real Gemini Web app.
+Chrome MV3 offscreen documents cannot host a full cross-origin Gemini Web session and are intentionally limited. A popup worker window is the most reliable extension-native MVP surface that can still run the real Gemini Web app.
 
-Chrome does not provide a supported way for extensions to run a fully invisible third-party page. If minimized popup creation fails in a browser environment, the extension falls back to an inactive tab so the branch can still work.
+Chrome does not provide a supported way for extensions to run a fully invisible third-party page. The worker window is opened visibly so Gemini can render reliably, then minimized after the branch reports that its composer is ready. If popup creation fails in a browser environment, the extension falls back to an inactive tab so the branch can still work.
 
 ## Selector strategy
 

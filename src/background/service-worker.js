@@ -403,8 +403,8 @@ async function createBranchWorker(shareUrl) {
     const branchWindow = await chrome.windows.create({
       url: shareUrl,
       type: "popup",
-      focused: false,
-      width: 420,
+      focused: true,
+      width: 520,
       height: 760,
       left: 0,
       top: 0
@@ -421,7 +421,7 @@ async function createBranchWorker(shareUrl) {
     const branchWindow = await chrome.windows.create({
       url: shareUrl,
       type: "popup",
-      focused: false
+      focused: true
     });
     return {
       branchWindow,

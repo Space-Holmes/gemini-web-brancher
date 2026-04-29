@@ -151,7 +151,7 @@
         parentTitle: document.title
       });
       upsertBranch(result.branch);
-      setStatus("Branch opened in a minimized branch window.");
+      setStatus("Branch worker opened. It will minimize when ready.");
     } catch (error) {
       setStatus(error.message || "Could not create branch.");
     } finally {

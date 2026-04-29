@@ -9,7 +9,7 @@
 - 可直接作为「加载已解压的扩展」安装。
 - 支持在 `https://gemini.google.com/*` 注入 Branch UI。
 - 点击 Branch 后自动尝试打开 Gemini 分享面板、创建/复制分享链接。
-- 创建最小化 popup worker 窗口作为 branch 会话。
+- 创建临时可见的 popup worker 窗口作为 branch 会话，ready 后自动最小化。
 - 在原页面每个 branch 面板里输入 prompt，并转发到对应 worker 窗口。
 - 从 worker 窗口监听最新 Gemini 回复文本，并同步显示到原页面。
 - Branch 会持续等待 Gemini 生成分享链接，并自动完成链接提取。
@@ -19,7 +19,7 @@
 
 1. Gemini 的分享链接是公开链接。这个扩展会为了创建分支而触发公开分享链接，敏感内容不要使用。
 2. Gemini Web 没有公开稳定的页面自动化 API，按钮文案和 DOM 改版都会影响成功率。
-3. Chrome 扩展无法真正运行一个完全不可见的第三方 Gemini 页面。MVP 使用最小化 popup worker 窗口；在部分系统上仍可能短暂出现在窗口列表或任务栏里。
+3. Chrome 扩展无法真正运行一个完全不可见的第三方 Gemini 页面。MVP 会短暂打开 popup worker 窗口，等 Gemini 输入框 ready 后再自动最小化。
 4. Workspace 管理员、账号类型、地区、年龄或 Gemini 产品限制都可能阻止分享或继续聊天。
 5. 当前只面向文字对话。文件、图片、Canvas、Deep Research 等复杂上下文没有保证。
 6. 扩展声明了 `clipboardRead` 权限，用于自动读取 Gemini 复制出的分享链接。

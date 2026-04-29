@@ -1,4 +1,4 @@
-#gwb-branch-root {
+.gwb-branch-root {
   box-sizing: border-box;
   width: min(100%, 840px);
   margin: 12px auto 20px;
@@ -6,9 +6,9 @@
   font: 13px/1.45 Google Sans, Roboto, Arial, sans-serif;
 }
 
-#gwb-branch-root *,
-#gwb-branch-root *::before,
-#gwb-branch-root *::after {
+.gwb-branch-root *,
+.gwb-branch-root *::before,
+.gwb-branch-root *::after {
   box-sizing: border-box;
 }
 
@@ -107,6 +107,9 @@
   height: 28px;
   border-radius: 14px;
   padding: 0 10px;
+}
+
+.gwb-panel-header [data-action="open"] {
   margin-left: auto;
 }
 
@@ -206,7 +209,7 @@
 }
 
 @media (max-width: 720px) {
-  #gwb-branch-root {
+  .gwb-branch-root {
     width: calc(100% - 24px);
   }
 

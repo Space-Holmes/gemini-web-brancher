@@ -2,8 +2,9 @@
 
 (() => {
   const SOURCE = "gwb";
-  const ROOT_ID = "gwb-branch-root";
-  const BUTTON_ID = "gwb-branch-button";
+  const ROOT_CLASS = "gwb-branch-root";
+  const ROOT_ID = `gwb-branch-root-${chrome.runtime.id}`;
+  const BUTTON_ID = `gwb-branch-button-${chrome.runtime.id}`;
   const RESPONSE_IDLE_MS = 8000;
   const SHARE_LINK_TIMEOUT_MS = 30000;
   const SHARE_DOM_FALLBACK_DELAY_MS = 8000;
@@ -206,6 +207,19 @@
         return true;
       }
 
+      if (message.type === "GWB_BRANCH_RENAME_NOW") {
+        enterBranchMode(message.branch || {});
+        renameBranchNow()
+          .then((renamed) => sendResponse({ ok: true, renamed }))
+          .catch((error) => {
+            sendResponse({
+              ok: false,
+              error: error.message || String(error)
+            });
+          });
+        return true;
+      }
+
       return false;
     });
   }
@@ -243,6 +257,8 @@
     if (!state.root) {
       state.root = document.createElement("section");
       state.root.id = ROOT_ID;
+      state.root.className = ROOT_CLASS;
+      state.root.dataset.extensionId = chrome.runtime.id;
       state.root.innerHTML = `
         <div class="gwb-toolbar">
           <button id="${BUTTON_ID}" class="gwb-branch-button" type="button">Branch</button>
@@ -529,6 +545,7 @@
         <strong data-role="title"></strong>
         <span class="gwb-pill" data-role="status"></span>
         <button class="gwb-small-button" type="button" data-action="open">Open</button>
+        <button class="gwb-small-button" type="button" data-action="rename">Rename</button>
         <button class="gwb-icon-button" type="button" data-action="close" title="Close branch">x</button>
       </header>
       <div class="gwb-output" data-role="output"></div>
@@ -559,6 +576,11 @@
     panel.querySelector("[data-action='open']").addEventListener("click", () => {
       focusBranch(branchId).catch((error) => {
         setStatus(error.message || "Could not open branch.");
+      });
+    });
+    panel.querySelector("[data-action='rename']").addEventListener("click", () => {
+      renameBranch(branchId).catch((error) => {
+        setStatus(error.message || "Could not rename branch.", { sticky: true, tone: "error" });
       });
     });
 
@@ -604,6 +626,17 @@
   async function focusBranch(branchId) {
     await sendRuntime("GWB_FOCUS_BRANCH", {
       branchId
+    });
+  }
+
+  async function renameBranch(branchId) {
+    setStatus("Trying branch rename...");
+    const result = await sendRuntime("GWB_RENAME_BRANCH", {
+      branchId
+    });
+    setStatus(result.renamed ? "Branch renamed." : "Rename controls not found.", {
+      sticky: !result.renamed,
+      tone: result.renamed ? "" : "error"
     });
   }
 
@@ -670,6 +703,29 @@
       console.warn("[Gemini Web Brancher] Could not rename branch conversation", error);
     }
     return false;
+  }
+
+  async function renameBranchNow() {
+    state.branchRenameCancelled = false;
+    state.branchRenameDone = false;
+    state.branchRenameRunning = true;
+    clearTimeout(state.branchRenameTimer);
+    state.branchRenameTimer = null;
+
+    try {
+      await prepareBranchComposer(30000);
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const renamed = await renameCurrentConversation(getBranchSuffix());
+        if (renamed) {
+          state.branchRenameDone = true;
+          return true;
+        }
+        await sleep(700);
+      }
+      return false;
+    } finally {
+      state.branchRenameRunning = false;
+    }
   }
 
   function scheduleBranchRenameWhenIdle(delayMs = 4000) {

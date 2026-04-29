@@ -70,6 +70,9 @@ async function handleMessage(message, sender) {
     case "GWB_FOCUS_BRANCH":
       return handleFocusBranch(message);
 
+    case "GWB_RENAME_BRANCH":
+      return handleRenameBranch(message);
+
     case "GWB_LIST_ALL_BRANCHES":
       return handleListAllBranches();
 
@@ -362,11 +365,43 @@ async function handleFocusBranch(message) {
   return { branch };
 }
 
+async function handleRenameBranch(message) {
+  const state = await loadState();
+  const branch = state.branches[message.branchId];
+  if (!branch) {
+    throw new Error("Branch not found.");
+  }
+  if (!Number.isInteger(branch.tabId)) {
+    throw new Error("Branch worker is closed.");
+  }
+
+  await focusBranchTab(branch);
+  const result = await chrome.tabs.sendMessage(branch.tabId, {
+    source: SOURCE,
+    type: "GWB_BRANCH_RENAME_NOW",
+    branch
+  });
+  return {
+    branch,
+    renamed: Boolean(result && result.renamed)
+  };
+}
+
 async function handleListAllBranches() {
   const state = await loadState();
   return {
     branches: Object.values(state.branches).sort((a, b) => b.createdAt - a.createdAt)
   };
+}
+
+async function focusBranchTab(branch) {
+  const tab = await chrome.tabs.update(branch.tabId, { active: true });
+  const windowId = Number.isInteger(branch.windowId) ? branch.windowId : tab.windowId;
+  if (Number.isInteger(windowId)) {
+    await chrome.windows.update(windowId, {
+      focused: true
+    });
+  }
 }
 
 async function handleClearClosed() {

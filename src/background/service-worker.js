@@ -123,6 +123,7 @@ async function handleCreateBranch(message, sender) {
     updatedAt: now,
     lastPrompt: "",
     lastOutput: "",
+    messages: [],
     error: ""
   };
 
@@ -166,6 +167,16 @@ async function handleSendPrompt(message) {
     branch = state.branches[message.branchId] || branch;
   }
 
+  const turnId = createId();
+  ensureBranchMessages(branch).push({
+    id: turnId,
+    prompt,
+    output: "",
+    outputHtml: "",
+    createdAt: Date.now(),
+    updatedAt: Date.now()
+  });
+  branch.activeTurnId = turnId;
   branch.status = "sending";
   branch.lastPrompt = prompt;
   branch.error = "";
@@ -180,6 +191,7 @@ async function handleSendPrompt(message) {
     source: SOURCE,
     type: "GWB_BRANCH_SUBMIT_PROMPT",
     branchId: branch.id,
+    turnId,
     prompt
   });
 
@@ -209,12 +221,19 @@ async function handleBranchReady(message, sender) {
 async function handleBranchOutput(message, sender) {
   const tabId = requireSenderTab(sender);
   const output = String(message.output || "");
+  const outputHtml = String(message.html || "");
   const branch = await updateBranchByTabId(tabId, {
     status: "streaming",
     branchUrl: message.url || "",
     lastOutput: output,
     error: "",
     updatedAt: Date.now()
+  }, (branch) => {
+    updateBranchTurn(branch, message.turnId, {
+      output,
+      outputHtml,
+      updatedAt: Date.now()
+    });
   });
 
   if (branch) {
@@ -222,6 +241,7 @@ async function handleBranchOutput(message, sender) {
       type: "GWB_BRANCH_OUTPUT",
       branchId: branch.id,
       output,
+      html: outputHtml,
       branch
     });
   }
@@ -240,7 +260,14 @@ async function handleBranchDone(message, sender) {
     patch.lastOutput = message.output;
   }
 
-  const branch = await updateBranchByTabId(tabId, patch);
+  const branch = await updateBranchByTabId(tabId, patch, (branch) => {
+    updateBranchTurn(branch, message.turnId, {
+      output: String(message.output || ""),
+      outputHtml: String(message.html || ""),
+      updatedAt: Date.now()
+    });
+    branch.activeTurnId = null;
+  });
   if (branch) {
     await notifyParent(branch, {
       type: "GWB_BRANCH_STATE",
@@ -354,7 +381,7 @@ async function saveState(state) {
   });
 }
 
-async function updateBranchByTabId(tabId, patch) {
+async function updateBranchByTabId(tabId, patch, mutate) {
   const state = await loadState();
   const branch = findBranchByTabId(state, tabId);
   if (!branch) {
@@ -362,6 +389,9 @@ async function updateBranchByTabId(tabId, patch) {
   }
 
   Object.assign(branch, patch);
+  if (mutate) {
+    mutate(branch);
+  }
   if (!patch.branchUrl && Number.isInteger(branch.tabId)) {
     try {
       const tab = await chrome.tabs.get(branch.tabId);
@@ -372,6 +402,21 @@ async function updateBranchByTabId(tabId, patch) {
   }
   await saveState(state);
   return branch;
+}
+
+function ensureBranchMessages(branch) {
+  if (!Array.isArray(branch.messages)) {
+    branch.messages = [];
+  }
+  return branch.messages;
+}
+
+function updateBranchTurn(branch, turnId, patch) {
+  const messages = ensureBranchMessages(branch);
+  const target = messages.find((message) => message.id === turnId) || messages[messages.length - 1];
+  if (target) {
+    Object.assign(target, patch);
+  }
 }
 
 async function notifyParent(branch, payload) {

@@ -20,7 +20,11 @@
     attachObserver: null,
     lastAnchor: null,
     branchOutputTimer: null,
-    branchLastOutput: ""
+    branchLastOutput: "",
+    branchLastHtml: "",
+    branchBaselineOutput: "",
+    branchCurrentTurnId: "",
+    branchStreaming: false
   };
 
   init().catch((error) => {
@@ -87,7 +91,7 @@
       }
 
       if (message.type === "GWB_BRANCH_SUBMIT_PROMPT") {
-        submitPromptToGemini(message.prompt)
+        submitPromptToGemini(message.prompt, message.turnId)
           .then(() => sendResponse({ ok: true }))
           .catch((error) => {
             reportBranchError(error);
@@ -374,7 +378,7 @@
     panel.querySelector("[data-role='status']").textContent = branch.workerMode === "visible-tab-fallback"
       ? `${branch.status || "opening"} / visible tab`
       : branch.status || "opening";
-    panel.querySelector("[data-role='output']").textContent = branch.lastOutput || "";
+    renderBranchMessages(panel.querySelector("[data-role='output']"), branch);
     panel.querySelector("[data-role='error']").textContent = branch.status === "opening" ? "" : branch.error || "";
 
     const input = panel.querySelector(".gwb-input");
@@ -445,8 +449,12 @@
     throw new Error(buildComposerTimeoutMessage(lastClickedText));
   }
 
-  async function submitPromptToGemini(prompt) {
+  async function submitPromptToGemini(prompt, turnId) {
     const editor = await waitForComposer(45000);
+    const before = findLatestModelResponse();
+    state.branchBaselineOutput = before ? normalizeText(before.innerText || before.textContent || "") : "";
+    state.branchCurrentTurnId = turnId || "";
+    state.branchStreaming = true;
     focusAndSetText(editor, prompt);
     await sleep(250);
 
@@ -457,6 +465,7 @@
 
     sendButton.click();
     state.branchLastOutput = "";
+    state.branchLastHtml = "";
     await sleep(1000);
     scanBranchOutput();
   }
@@ -468,32 +477,40 @@
       subtree: true,
       characterData: true
     });
-    scanBranchOutput();
   }
 
   function scanBranchOutput() {
     if (state.role !== "branch") {
       return;
     }
+    if (!state.branchStreaming) {
+      return;
+    }
 
     const latest = findLatestModelResponse();
     const output = latest ? normalizeText(latest.innerText || latest.textContent || "") : "";
-    if (!output || output === state.branchLastOutput) {
+    if (!output || output === state.branchBaselineOutput || output === state.branchLastOutput) {
       return;
     }
 
     state.branchLastOutput = output;
+    state.branchLastHtml = latest ? sanitizeHtml(latest.innerHTML || "") : "";
     sendRuntime("GWB_BRANCH_OUTPUT", {
       branchId: state.branchMeta && state.branchMeta.id,
+      turnId: state.branchCurrentTurnId,
       output,
+      html: state.branchLastHtml,
       url: location.href
     }).catch(console.error);
 
     clearTimeout(state.branchOutputTimer);
     state.branchOutputTimer = setTimeout(() => {
+      state.branchStreaming = false;
       sendRuntime("GWB_BRANCH_DONE", {
         branchId: state.branchMeta && state.branchMeta.id,
+        turnId: state.branchCurrentTurnId,
         output: state.branchLastOutput,
+        html: state.branchLastHtml,
         url: location.href
       }).catch(console.error);
     }, RESPONSE_IDLE_MS);
@@ -531,6 +548,59 @@
 
   function pickInsertionTarget(anchor) {
     return anchor.closest("model-response, [data-test-id*='response' i], [data-testid*='response' i], .model-response, article") || anchor;
+  }
+
+  function renderBranchMessages(container, branch) {
+    const messages = Array.isArray(branch.messages) ? branch.messages : [];
+    container.replaceChildren();
+
+    for (const message of messages) {
+      const userTurn = document.createElement("section");
+      userTurn.className = "gwb-turn gwb-turn-user";
+      userTurn.innerHTML = `
+        <div class="gwb-turn-label">You</div>
+        <div class="gwb-turn-content gwb-text"></div>
+      `;
+      userTurn.querySelector(".gwb-turn-content").textContent = message.prompt || "";
+      container.append(userTurn);
+
+      if (message.outputHtml || message.output || branch.status === "sending" || branch.status === "streaming") {
+        const assistantTurn = document.createElement("section");
+        assistantTurn.className = "gwb-turn gwb-turn-assistant";
+        assistantTurn.innerHTML = `
+          <div class="gwb-turn-label">Gemini</div>
+          <div class="gwb-turn-content"></div>
+        `;
+        const content = assistantTurn.querySelector(".gwb-turn-content");
+        if (message.outputHtml) {
+          content.classList.add("gwb-html");
+          content.innerHTML = sanitizeHtml(message.outputHtml);
+        } else if (message.output) {
+          content.classList.add("gwb-text");
+          content.textContent = message.output;
+        } else {
+          content.classList.add("gwb-text", "gwb-muted");
+          content.textContent = "Waiting for response...";
+        }
+        container.append(assistantTurn);
+      }
+    }
+  }
+
+  function sanitizeHtml(html) {
+    const template = document.createElement("template");
+    template.innerHTML = String(html || "");
+    template.content.querySelectorAll("script, iframe, object, embed, link, meta").forEach((element) => element.remove());
+    template.content.querySelectorAll("*").forEach((element) => {
+      for (const attribute of Array.from(element.attributes)) {
+        const name = attribute.name.toLowerCase();
+        const value = attribute.value.trim().toLowerCase();
+        if (name.startsWith("on") || name === "srcdoc" || value.startsWith("javascript:")) {
+          element.removeAttribute(attribute.name);
+        }
+      }
+    });
+    return template.innerHTML;
   }
 
   function findShareUrlInDocument(root = document) {

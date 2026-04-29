@@ -113,12 +113,56 @@
 .gwb-output {
   max-height: 360px;
   overflow: auto;
-  white-space: pre-wrap;
   color: #202124;
+  display: grid;
+  gap: 10px;
 }
 
 .gwb-output:empty {
   display: none;
+}
+
+.gwb-turn {
+  display: grid;
+  gap: 4px;
+}
+
+.gwb-turn-label {
+  color: #5f6368;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.gwb-turn-content {
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.gwb-turn-user .gwb-turn-content {
+  background: #e8f0fe;
+}
+
+.gwb-turn-assistant .gwb-turn-content {
+  background: #f8fafd;
+}
+
+.gwb-text {
+  white-space: pre-wrap;
+}
+
+.gwb-html {
+  white-space: normal;
+}
+
+.gwb-html mjx-container,
+.gwb-html .katex {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.gwb-muted {
+  color: #5f6368;
 }
 
 .gwb-form {

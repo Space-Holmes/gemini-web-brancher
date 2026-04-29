@@ -64,6 +64,7 @@
     installRuntimeListener();
     await sleep(1200);
     await prepareBranchComposer(60000);
+    await renameBranchConversationIfNeeded();
     await sendRuntime("GWB_BRANCH_READY", {
       branchId: state.branchMeta.id,
       url: location.href
@@ -447,6 +448,410 @@
     }
 
     throw new Error(buildComposerTimeoutMessage(lastClickedText));
+  }
+
+  async function renameBranchConversationIfNeeded() {
+    const suffix = getBranchSuffix();
+    if (!suffix) {
+      return;
+    }
+
+    try {
+      await sleep(1400);
+      const renamed = await renameCurrentConversation(suffix);
+      if (!renamed) {
+        console.warn("[Gemini Web Brancher] Could not find Gemini rename controls.");
+      }
+    } catch (error) {
+      console.warn("[Gemini Web Brancher] Could not rename branch conversation", error);
+    }
+  }
+
+  async function renameCurrentConversation(suffix) {
+    const opener = await waitForRenameMenuOpener(9000);
+    if (!opener) {
+      return false;
+    }
+
+    activateElement(opener);
+    const renameAction = await waitForElement(() => findRenameAction(), 5000).catch(() => null);
+    if (!renameAction) {
+      closeAnyDialog();
+      return false;
+    }
+
+    activateElement(renameAction);
+    const editor = await waitForElement(() => findRenameEditor(), 5000).catch(() => null);
+    if (!editor) {
+      closeAnyDialog();
+      return false;
+    }
+
+    const currentTitle = getEditorText(editor) || detectConversationTitle() || cleanConversationTitle(state.branchMeta.parentTitle) || "Gemini branch";
+    const desiredTitle = `${stripBranchSuffix(currentTitle)}${suffix}`;
+    if (!desiredTitle || normalizeText(getEditorText(editor)) === desiredTitle) {
+      closeAnyDialog();
+      return true;
+    }
+
+    focusAndSetText(editor, desiredTitle);
+    await sleep(250);
+
+    const surface = getTopDialogSurface() || document;
+    const confirm = findRenameConfirmButton(surface);
+    if (confirm) {
+      activateElement(confirm);
+    } else {
+      pressEnter(editor);
+    }
+    await sleep(900);
+    return true;
+  }
+
+  async function waitForRenameMenuOpener(timeoutMs) {
+    const startedAt = Date.now();
+    let triedHistoryReveal = false;
+    while (Date.now() - startedAt < timeoutMs) {
+      const opener = await findRenameMenuOpener();
+      if (opener) {
+        return opener;
+      }
+
+      if (!triedHistoryReveal) {
+        triedHistoryReveal = true;
+        await revealConversationHistory();
+      }
+      await sleep(700);
+    }
+    return null;
+  }
+
+  async function findRenameMenuOpener() {
+    const containers = findCurrentConversationContainers();
+
+    for (const container of containers) {
+      revealElementControls(container);
+      await sleep(150);
+      const button = findConversationMenuButton(container);
+      if (button) {
+        return button;
+      }
+    }
+
+    const titleMenu = findTitleMenuButton();
+    if (titleMenu) {
+      return titleMenu;
+    }
+
+    return null;
+  }
+
+  function findCurrentConversationContainers() {
+    const containers = [];
+    const currentPath = getCurrentAppPath();
+
+    if (currentPath) {
+      for (const anchor of queryAllDeep(document, "a[href*='gemini.google.com/app'], a[href^='/app'], a[href*='/app/']")) {
+        if (!(anchor instanceof HTMLAnchorElement) || !isVisible(anchor) || anchor.closest(`#${ROOT_ID}`)) {
+          continue;
+        }
+        if (getAnchorPath(anchor) !== currentPath) {
+          continue;
+        }
+        containers.push(anchor.closest("[role='listitem'], li, mat-list-item, [data-test-id], [data-testid], .conversation, .chat, .history") || anchor.parentElement || anchor);
+      }
+    }
+
+    for (const selected of queryAllDeep(document, "[aria-current='page'], [aria-selected='true'], [data-active='true'], [class*='selected' i], [class*='active' i]")) {
+      if (!isVisible(selected) || selected.closest(`#${ROOT_ID}`) || isAccountOrChromeEntry(selected)) {
+        continue;
+      }
+      const label = getElementVisibleLabel(selected);
+      if (!isLikelyConversationTitle(label)) {
+        continue;
+      }
+      containers.push(selected.closest("[role='listitem'], li, mat-list-item, [data-test-id], [data-testid], .conversation, .chat, .history") || selected);
+    }
+
+    return uniqueElements(containers)
+      .filter(Boolean)
+      .filter((element) => element instanceof Element)
+      .filter((element) => !element.closest(`#${ROOT_ID}`))
+      .slice(0, 8);
+  }
+
+  function findConversationMenuButton(container) {
+    return queryAllDeep(container, "button, [role='button']")
+      .filter(isVisible)
+      .filter(isEnabled)
+      .filter((element) => !element.closest(`#${ROOT_ID}`))
+      .filter((element) => !isAccountOrChromeEntry(element))
+      .map((element) => ({
+        element,
+        score: conversationMenuButtonScore(element)
+      }))
+      .filter((candidate) => candidate.score > 0)
+      .sort((a, b) => b.score - a.score)[0]?.element || null;
+  }
+
+  function conversationMenuButtonScore(element) {
+    const label = getElementLabel(element).toLowerCase();
+    const text = normalizeText(element.innerText || element.textContent || "").toLowerCase();
+    const rect = element.getBoundingClientRect();
+    let score = 0;
+
+    if (/more|options|menu|overflow|更多|选项|菜单|操作/.test(label)) {
+      score += 40;
+    }
+    if (/more_vert|more_horiz|⋮|…|\.\.\./.test(text)) {
+      score += 28;
+    }
+    if (element.getAttribute("aria-haspopup") === "menu" || element.getAttribute("aria-expanded") !== null) {
+      score += 20;
+    }
+    if (rect.width <= 56 && rect.height <= 56) {
+      score += 8;
+    }
+    if (/new chat|发起新对话|新对话|account|账号|settings|设置/.test(label)) {
+      score -= 80;
+    }
+
+    return score;
+  }
+
+  function findTitleMenuButton() {
+    const title = detectConversationTitle();
+    return queryAllDeep(document, "button, [role='button']")
+      .filter(isVisible)
+      .filter(isEnabled)
+      .filter((element) => !element.closest(`#${ROOT_ID}`))
+      .filter((element) => !isAccountOrChromeEntry(element))
+      .map((element) => ({
+        element,
+        label: getElementVisibleLabel(element),
+        score: titleMenuButtonScore(element, title)
+      }))
+      .filter((candidate) => candidate.score > 0)
+      .sort((a, b) => b.score - a.score)[0]?.element || null;
+  }
+
+  function titleMenuButtonScore(element, title) {
+    const label = getElementVisibleLabel(element).toLowerCase();
+    let score = 0;
+    if (title && label.includes(title.toLowerCase())) {
+      score += 30;
+    }
+    if (/more|options|menu|rename|title|conversation|更多|选项|菜单|重命名|标题|对话/.test(label)) {
+      score += 20;
+    }
+    if (element.getAttribute("aria-haspopup") === "menu" || element.getAttribute("aria-expanded") !== null) {
+      score += 16;
+    }
+    if (/gemini|pro|发起新对话|new chat|google 账号|google account/.test(label) && (!title || !label.includes(title.toLowerCase()))) {
+      score -= 60;
+    }
+    return score;
+  }
+
+  function findRenameAction() {
+    return findActionByTerms(getTopDialogSurface() || document, [
+      "rename",
+      "edit title",
+      "edit name",
+      "change title",
+      "重命名",
+      "修改名称",
+      "编辑名称",
+      "更改名称",
+      "修改标题",
+      "编辑标题"
+    ]);
+  }
+
+  function findRenameEditor() {
+    const surface = getTopDialogSurface() || document;
+    const candidates = queryAllDeep(surface, "input:not([type='hidden']), textarea, [contenteditable='true'], [contenteditable='plaintext-only'], [role='textbox']")
+      .filter(isVisible)
+      .filter(isEnabled)
+      .filter((element) => !element.closest(`#${ROOT_ID}`))
+      .map((element) => ({
+        element,
+        score: renameEditorScore(element)
+      }))
+      .filter((candidate) => candidate.score > 0)
+      .sort((a, b) => b.score - a.score);
+
+    return candidates[0]?.element || null;
+  }
+
+  function renameEditorScore(element) {
+    const label = getElementLabel(element).toLowerCase();
+    let score = 1;
+    if (/rename|title|name|chat|conversation|重命名|标题|名称|对话/.test(label)) {
+      score += 35;
+    }
+    if (element instanceof HTMLInputElement) {
+      score += 15;
+    }
+    if (element === document.activeElement) {
+      score += 20;
+    }
+    if (element.closest("[role='dialog'], mat-dialog-container, .cdk-overlay-pane")) {
+      score += 18;
+    }
+    if (/prompt|message|send|输入提示|发送/.test(label)) {
+      score -= 80;
+    }
+    return score;
+  }
+
+  function findRenameConfirmButton(surface) {
+    const terms = [
+      "rename",
+      "save",
+      "done",
+      "ok",
+      "confirm",
+      "重命名",
+      "保存",
+      "完成",
+      "确定",
+      "确认"
+    ];
+    const cancelTerms = /cancel|close|dismiss|取消|关闭/;
+    return queryAllDeep(surface, "button, [role='button']")
+      .filter(isVisible)
+      .filter(isEnabled)
+      .filter((element) => !element.closest(`#${ROOT_ID}`))
+      .find((element) => {
+        const label = getElementLabel(element).toLowerCase();
+        return terms.some((term) => label.includes(term)) && !cancelTerms.test(label);
+      }) || null;
+  }
+
+  function findActionByTerms(root, terms) {
+    const normalizedTerms = terms.map((term) => term.toLowerCase());
+    return queryAllDeep(root, "button, [role='button'], [role='menuitem'], [role='option'], mat-option, a, div[aria-label], span[aria-label]")
+      .filter(isVisible)
+      .filter(isEnabled)
+      .filter((element) => !element.closest(`#${ROOT_ID}`))
+      .find((element) => {
+        const label = getElementLabel(element).toLowerCase();
+        return normalizedTerms.some((term) => label.includes(term));
+      }) || null;
+  }
+
+  async function revealConversationHistory() {
+    const opener = findActionByTerms(document, [
+      "open sidebar",
+      "show sidebar",
+      "open navigation",
+      "main menu",
+      "history",
+      "打开侧边栏",
+      "显示侧边栏",
+      "打开导航",
+      "主菜单",
+      "历史记录"
+    ]);
+    if (opener && isEnabled(opener) && !isAccountOrChromeEntry(opener)) {
+      activateElement(opener);
+    }
+  }
+
+  function revealElementControls(element) {
+    element.scrollIntoView({
+      block: "center",
+      inline: "nearest"
+    });
+    element.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, pointerType: "mouse" }));
+    element.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    element.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    if (element instanceof HTMLElement) {
+      element.focus({ preventScroll: true });
+    }
+  }
+
+  function getTopDialogSurface() {
+    const surfaces = queryAllDeep(document, "[role='dialog'], mat-dialog-container, .cdk-overlay-pane, .cdk-overlay-container")
+      .filter(isVisible);
+    return surfaces[surfaces.length - 1] || null;
+  }
+
+  function getBranchSuffix() {
+    if (!state.branchMeta) {
+      return "";
+    }
+    if (state.branchMeta.branchSuffix) {
+      return String(state.branchMeta.branchSuffix);
+    }
+    const number = Number(state.branchMeta.branchNumber);
+    return number ? `_branch${number}` : "";
+  }
+
+  function detectConversationTitle() {
+    const candidates = findCurrentConversationContainers()
+      .map(getElementVisibleLabel)
+      .map(cleanConversationTitle)
+      .filter(isLikelyConversationTitle);
+
+    candidates.push(cleanConversationTitle(document.title));
+    candidates.push(cleanConversationTitle(state.branchMeta && state.branchMeta.parentTitle));
+
+    return candidates.find(isLikelyConversationTitle) || "";
+  }
+
+  function getCurrentAppPath() {
+    if (location.hostname !== "gemini.google.com" || !location.pathname.startsWith("/app")) {
+      return "";
+    }
+    return location.pathname.replace(/\/$/, "");
+  }
+
+  function getAnchorPath(anchor) {
+    try {
+      return new URL(anchor.href, location.href).pathname.replace(/\/$/, "");
+    } catch {
+      return "";
+    }
+  }
+
+  function getEditorText(editor) {
+    if (editor instanceof HTMLTextAreaElement || editor instanceof HTMLInputElement) {
+      return normalizeText(editor.value);
+    }
+    return normalizeText(editor.innerText || editor.textContent || "");
+  }
+
+  function cleanConversationTitle(title) {
+    return normalizeText(title)
+      .replace(/[\u200e\u200f\u202a-\u202e]/g, "")
+      .replace(/^gemini\s*[-–—]\s*/i, "")
+      .replace(/\s+https?:\/\/\S+$/i, "")
+      .trim();
+  }
+
+  function stripBranchSuffix(title) {
+    const cleaned = cleanConversationTitle(title);
+    return cleaned.replace(/(?:_branch\d+)+$/i, "").trim() || cleaned;
+  }
+
+  function isLikelyConversationTitle(title) {
+    const cleaned = cleanConversationTitle(title);
+    if (!cleaned || cleaned.length < 2 || cleaned.length > 120) {
+      return false;
+    }
+    return !/^(gemini|pro|new chat|发起新对话|新对话|google 账号|google account|history|历史记录)$/i.test(cleaned);
+  }
+
+  function pressEnter(element) {
+    for (const type of ["keydown", "keypress", "keyup"]) {
+      element.dispatchEvent(new KeyboardEvent(type, {
+        key: "Enter",
+        code: "Enter",
+        bubbles: true
+      }));
+    }
   }
 
   async function submitPromptToGemini(prompt, turnId) {
@@ -1026,7 +1431,7 @@
   }
 
   function branchLabel(branch) {
-    const index = Array.from(state.branches.keys()).indexOf(branch.id) + 1;
+    const index = Number(branch.branchNumber) || Array.from(state.branches.keys()).indexOf(branch.id) + 1;
     return `Branch ${index}`;
   }
 

@@ -105,6 +105,9 @@ async function handleCreateBranch(message, sender) {
   const parentTabId = requireSenderTab(sender);
   const shareUrl = normalizeShareUrl(message.shareUrl);
   const parentTab = await chrome.tabs.get(parentTabId);
+  const state = await loadState();
+  const branchNumber = nextBranchNumber(state, parentTabId);
+  const branchSuffix = `_branch${branchNumber}`;
   const { branchWindow, branchTab } = await createBranchWorker(shareUrl);
 
   const now = Date.now();
@@ -113,6 +116,8 @@ async function handleCreateBranch(message, sender) {
     parentTabId,
     parentUrl: message.parentUrl || parentTab.url || "",
     parentTitle: message.parentTitle || parentTab.title || "",
+    branchNumber,
+    branchSuffix,
     shareUrl,
     branchUrl: branchTab.url || shareUrl,
     tabId: branchTab.id,
@@ -127,7 +132,6 @@ async function handleCreateBranch(message, sender) {
     error: ""
   };
 
-  const state = await loadState();
   state.branches[branch.id] = branch;
   await saveState(state);
   await notifyParent(branch, {
@@ -442,6 +446,12 @@ function branchesForParentTab(state, parentTabId) {
   return Object.values(state.branches)
     .filter((branch) => branch.parentTabId === parentTabId)
     .sort((a, b) => a.createdAt - b.createdAt);
+}
+
+function nextBranchNumber(state, parentTabId) {
+  const existing = branchesForParentTab(state, parentTabId)
+    .map((branch) => Number(branch.branchNumber) || 0);
+  return existing.length ? Math.max(...existing) + 1 : 1;
 }
 
 async function createBranchWorker(shareUrl) {

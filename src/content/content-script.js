@@ -145,6 +145,7 @@
 
     try {
       const shareUrl = await extractShareUrl();
+      setStatus("Opening branch worker...");
       const result = await sendRuntime("GWB_CREATE_BRANCH", {
         shareUrl,
         parentUrl: location.href,
@@ -153,7 +154,7 @@
       upsertBranch(result.branch);
       setStatus("Branch worker opened. It will minimize when ready.");
     } catch (error) {
-      setStatus(error.message || "Could not create branch.");
+      setStatus(error.message || "Could not create branch.", { sticky: true, tone: "error" });
     } finally {
       button.disabled = false;
       renderBranches();
@@ -359,7 +360,9 @@
 
   function updateBranchPanel(panel, branch) {
     panel.querySelector("[data-role='title']").textContent = branchLabel(branch);
-    panel.querySelector("[data-role='status']").textContent = branch.status || "opening";
+    panel.querySelector("[data-role='status']").textContent = branch.workerMode === "visible-tab-fallback"
+      ? `${branch.status || "opening"} / visible tab`
+      : branch.status || "opening";
     panel.querySelector("[data-role='output']").textContent = branch.lastOutput || "";
     panel.querySelector("[data-role='error']").textContent = branch.status === "opening" ? "" : branch.error || "";
 
@@ -703,16 +706,18 @@
     return response.data || {};
   }
 
-  function setStatus(text) {
+  function setStatus(text, options = {}) {
     if (!state.statusText) {
       return;
     }
+    state.statusText.classList.toggle("gwb-status-error", options.tone === "error");
     state.statusText.textContent = text;
-    if (text) {
+    if (text && !options.sticky) {
       clearTimeout(setStatus.timer);
       setStatus.timer = setTimeout(() => {
         if (state.statusText) {
           state.statusText.textContent = "";
+          state.statusText.classList.remove("gwb-status-error");
         }
       }, 4500);
     }

@@ -117,6 +117,7 @@ async function handleCreateBranch(message, sender) {
     branchUrl: branchTab.url || shareUrl,
     tabId: branchTab.id,
     windowId: branchWindow ? branchWindow.id : null,
+    workerMode: branchWindow ? "popup" : "visible-tab-fallback",
     status: "opening",
     createdAt: now,
     updatedAt: now,
@@ -433,7 +434,7 @@ async function createBranchWorker(shareUrl) {
 
   const branchTab = await chrome.tabs.create({
     url: shareUrl,
-    active: false
+    active: true
   });
   return {
     branchWindow: null,

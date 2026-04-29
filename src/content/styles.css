@@ -55,6 +55,10 @@
   color: #5f6368;
 }
 
+.gwb-status-error {
+  color: #b3261e;
+}
+
 .gwb-panels {
   display: grid;
   gap: 10px;

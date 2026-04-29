@@ -215,7 +215,7 @@
     while (Date.now() - startedAt < timeoutMs) {
       const surface = getShareSurface();
 
-      const createLink = findButtonByTermsIn(surface, [
+      const createTerms = [
         "create public link",
         "create link",
         "generate public link",
@@ -229,7 +229,8 @@
         "生成链接",
         "获取链接",
         "公开链接"
-      ]);
+      ];
+      const createLink = findButtonByTermsIn(surface, createTerms) || findButtonByTermsIn(document, createTerms);
       if (!clickedCreate && createLink && isEnabled(createLink)) {
         setStatus("Generating Gemini share link...");
         createLink.click();
@@ -238,7 +239,7 @@
         continue;
       }
 
-      const copyButton = findButtonByTermsIn(surface, [
+      const copyTerms = [
         "copy public link",
         "copy link",
         "copy url",
@@ -247,7 +248,8 @@
         "复制公共链接",
         "复制链接",
         "复制"
-      ]);
+      ];
+      const copyButton = findButtonByTermsIn(surface, copyTerms) || findButtonByTermsIn(document, copyTerms);
       if (copyButton && isEnabled(copyButton) && Date.now() - lastCopyClickAt > 2500) {
         setStatus("Copying Gemini share link...");
         copyButton.click();
@@ -260,7 +262,7 @@
         continue;
       }
 
-      const shareUrl = findShareUrlInDocument(surface);
+      const shareUrl = findShareUrlInDocument(surface) || findShareUrlInDocument(document);
       if (shareUrl) {
         domFallbackUrl = shareUrl;
         if (lastCopyClickAt || Date.now() - startedAt > SHARE_DOM_FALLBACK_DELAY_MS) {
@@ -658,7 +660,8 @@
       .filter((element, index, elements) => elements.indexOf(element) === index)
       .filter((element) => !element.closest(`#${ROOT_ID}`))
       .filter((element) => isVisible(element) || element instanceof HTMLAnchorElement)
-      .filter(isEnabled);
+      .filter(isEnabled)
+      .sort(compareContinueCandidates);
 
     const textMatch = candidates.find((element) => {
       if (isAccountOrChromeEntry(element)) {
@@ -702,10 +705,40 @@
     if (!label.includes("continue") && !label.includes("继续")) {
       return null;
     }
-    return element.closest("a[href], button, [role='button'], [tabindex], [jsaction], [data-action]") || element;
+    if (label.length > 120) {
+      return null;
+    }
+    return element.closest("a[href], button, [role='button']") || element;
+  }
+
+  function compareContinueCandidates(a, b) {
+    return continueCandidateScore(b) - continueCandidateScore(a);
+  }
+
+  function continueCandidateScore(element) {
+    const label = getElementVisibleLabel(element).toLowerCase();
+    let score = 0;
+    if (element.matches("button, [role='button']")) {
+      score += 30;
+    }
+    if (element instanceof HTMLAnchorElement) {
+      score += 15;
+    }
+    if (/^(继续此对话|继续此聊天|继续对话|继续聊天|继续|continue this conversation|continue this chat|continue)$/i.test(label.trim())) {
+      score += 50;
+    }
+    if (label.includes("继续此对话") || label.includes("continue this conversation")) {
+      score += 25;
+    }
+    score -= Math.min(label.length, 200) / 10;
+    return score;
   }
 
   function activateElement(element) {
+    element.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "mouse" }));
+    element.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    element.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerType: "mouse" }));
+    element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
     if (element instanceof HTMLAnchorElement && element.href) {
       element.click();
       return;

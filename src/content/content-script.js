@@ -23,11 +23,15 @@
     parentUrl: "",
     branchListRequestToken: 0,
     branchOutputTimer: null,
+    branchOutputPoller: null,
     branchLastOutput: "",
     branchLastHtml: "",
     branchBaselineOutput: "",
     branchCurrentTurnId: "",
-    branchStreaming: false
+    branchStreaming: false,
+    branchRenamePromise: null,
+    branchRenameDone: false,
+    branchRenameCancelled: false
   };
 
   init().catch((error) => {
@@ -130,7 +134,12 @@
     installRuntimeListener();
     await sleep(1200);
     await prepareBranchComposer(60000);
-    await renameBranchConversationIfNeeded();
+    state.branchRenameDone = false;
+    state.branchRenameCancelled = false;
+    state.branchRenamePromise = renameBranchConversationIfNeeded();
+    state.branchRenamePromise.catch((error) => {
+      console.warn("[Gemini Web Brancher] Could not rename branch conversation", error);
+    });
     await sendRuntime("GWB_BRANCH_READY", {
       branchId: state.branchMeta.id,
       url: location.href
@@ -497,6 +506,11 @@
     if (!branch || !branch.id) {
       return;
     }
+    if (branch.status === "closed") {
+      state.branches.delete(branch.id);
+      renderBranches();
+      return;
+    }
     state.branches.set(branch.id, branch);
     renderBranches();
   }
@@ -530,36 +544,69 @@
   async function renameBranchConversationIfNeeded() {
     const suffix = getBranchSuffix();
     if (!suffix) {
+      state.branchRenameDone = true;
       return;
     }
 
     try {
-      await sleep(1400);
-      const renamed = await renameCurrentConversation(suffix);
-      if (!renamed) {
-        console.warn("[Gemini Web Brancher] Could not find Gemini rename controls.");
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (state.branchRenameCancelled) {
+          return;
+        }
+        await sleep(attempt === 0 ? 1600 : 2500);
+        const renamed = await renameCurrentConversation(suffix);
+        if (renamed) {
+          return;
+        }
       }
+      console.warn("[Gemini Web Brancher] Could not find Gemini rename controls.");
     } catch (error) {
       console.warn("[Gemini Web Brancher] Could not rename branch conversation", error);
+    } finally {
+      state.branchRenameDone = true;
+    }
+  }
+
+  async function waitForBranchRenameBeforePrompt() {
+    if (!state.branchRenamePromise) {
+      return;
+    }
+
+    await Promise.race([
+      state.branchRenamePromise.catch(() => null),
+      sleep(3500)
+    ]);
+    if (!state.branchRenameDone) {
+      state.branchRenameCancelled = true;
     }
   }
 
   async function renameCurrentConversation(suffix) {
+    if (state.branchRenameCancelled) {
+      return false;
+    }
+
+    await revealConversationHistory();
+    await sleep(350);
+    if (state.branchRenameCancelled) {
+      return false;
+    }
+
     const opener = await waitForRenameMenuOpener(9000);
-    if (!opener) {
+    if (!opener || state.branchRenameCancelled) {
       return false;
     }
 
     activateElement(opener);
     const renameAction = await waitForElement(() => findRenameAction(), 5000).catch(() => null);
-    if (!renameAction) {
+    if (!renameAction || state.branchRenameCancelled) {
       closeAnyDialog();
       return false;
     }
 
     activateElement(renameAction);
     const editor = await waitForElement(() => findRenameEditor(), 5000).catch(() => null);
-    if (!editor) {
+    if (!editor || state.branchRenameCancelled) {
       closeAnyDialog();
       return false;
     }
@@ -573,6 +620,10 @@
 
     focusAndSetText(editor, desiredTitle);
     await sleep(250);
+    if (state.branchRenameCancelled) {
+      closeAnyDialog();
+      return false;
+    }
 
     const surface = getTopDialogSurface() || document;
     const confirm = findRenameConfirmButton(surface);
@@ -639,6 +690,8 @@
       }
     }
 
+    containers.push(...findConversationContainersByTitleText());
+
     for (const selected of queryAllDeep(document, "[aria-current='page'], [aria-selected='true'], [data-active='true'], [class*='selected' i], [class*='active' i]")) {
       if (!isVisible(selected) || selected.closest(`#${ROOT_ID}`) || isAccountOrChromeEntry(selected)) {
         continue;
@@ -657,8 +710,31 @@
       .slice(0, 8);
   }
 
+  function findConversationContainersByTitleText() {
+    const titles = [
+      state.branchMeta && state.branchMeta.parentTitle,
+      document.title
+    ]
+      .map(cleanConversationTitle)
+      .filter(isLikelyConversationTitle);
+
+    if (!titles.length) {
+      return [];
+    }
+
+    return queryAllDeep(document, "aside a, nav a, [role='navigation'] a, [role='listitem'], li, a[href*='/app/']")
+      .filter(isVisible)
+      .filter((element) => !element.closest(`#${ROOT_ID}`))
+      .filter((element) => {
+        const label = cleanConversationTitle(getElementVisibleLabel(element));
+        return titles.some((title) => label === title || label.includes(title) || title.includes(label));
+      })
+      .map((element) => element.closest("[role='listitem'], li, mat-list-item, [data-test-id], [data-testid], .conversation, .chat, .history") || element);
+  }
+
   function findConversationMenuButton(container) {
-    return queryAllDeep(container, "button, [role='button']")
+    return conversationMenuSearchRoots(container)
+      .flatMap((root) => queryAllDeep(root, "button, [role='button']"))
       .filter(isVisible)
       .filter(isEnabled)
       .filter((element) => !element.closest(`#${ROOT_ID}`))
@@ -669,6 +745,19 @@
       }))
       .filter((candidate) => candidate.score > 0)
       .sort((a, b) => b.score - a.score)[0]?.element || null;
+  }
+
+  function conversationMenuSearchRoots(container) {
+    const roots = [container];
+    let current = container.parentElement;
+    while (current && roots.length < 5) {
+      roots.push(current);
+      if (current.matches("aside, nav, [role='navigation'], main, body")) {
+        break;
+      }
+      current = current.parentElement;
+    }
+    return uniqueElements(roots);
   }
 
   function conversationMenuButtonScore(element) {
@@ -733,10 +822,14 @@
   function findRenameAction() {
     return findActionByTerms(getTopDialogSurface() || document, [
       "rename",
+      "rename chat",
+      "rename conversation",
       "edit title",
       "edit name",
       "change title",
       "重命名",
+      "重命名聊天",
+      "重命名对话",
       "修改名称",
       "编辑名称",
       "更改名称",
@@ -932,6 +1025,10 @@
   }
 
   async function submitPromptToGemini(prompt, turnId) {
+    await waitForBranchRenameBeforePrompt();
+    closeAnyDialog();
+    await sleep(150);
+
     const editor = await waitForComposer(45000);
     const before = findLatestModelResponse();
     state.branchBaselineOutput = before ? normalizeText(before.innerText || before.textContent || "") : "";
@@ -945,9 +1042,10 @@
       throw new Error("Could not find Gemini send button.");
     }
 
-    sendButton.click();
+    activateElement(sendButton);
     state.branchLastOutput = "";
     state.branchLastHtml = "";
+    startBranchOutputPolling();
     await sleep(1000);
     scanBranchOutput();
   }
@@ -959,6 +1057,20 @@
       subtree: true,
       characterData: true
     });
+  }
+
+  function startBranchOutputPolling() {
+    stopBranchOutputPolling();
+    state.branchOutputPoller = setInterval(scanBranchOutput, 1000);
+  }
+
+  function stopBranchOutputPolling() {
+    if (state.branchOutputPoller) {
+      clearInterval(state.branchOutputPoller);
+      state.branchOutputPoller = null;
+    }
+    clearTimeout(state.branchOutputTimer);
+    state.branchOutputTimer = null;
   }
 
   function scanBranchOutput() {
@@ -988,6 +1100,7 @@
     clearTimeout(state.branchOutputTimer);
     state.branchOutputTimer = setTimeout(() => {
       state.branchStreaming = false;
+      stopBranchOutputPolling();
       sendRuntime("GWB_BRANCH_DONE", {
         branchId: state.branchMeta && state.branchMeta.id,
         turnId: state.branchCurrentTurnId,
@@ -999,6 +1112,7 @@
   }
 
   async function reportBranchError(error) {
+    stopBranchOutputPolling();
     const message = error && error.message ? error.message : String(error);
     console.error("[Gemini Web Brancher]", message);
     await sendRuntime("GWB_BRANCH_ERROR", {
@@ -1515,6 +1629,7 @@
 
   function currentConversationBranches() {
     return Array.from(state.branches.values())
+      .filter((branch) => branch.status !== "closed")
       .filter((branch) => branchParentConversationKey(branch) === state.parentConversationKey)
       .sort((a, b) => a.createdAt - b.createdAt);
   }

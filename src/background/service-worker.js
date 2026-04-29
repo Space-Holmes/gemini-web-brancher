@@ -121,7 +121,7 @@ async function handleCreateBranch(message, sender) {
   const parentConversationKey = message.parentConversationKey || conversationKeyFromUrl(parentUrl);
   const branchNumber = nextBranchNumber(state, parentTabId, parentConversationKey);
   const branchSuffix = `_branch${branchNumber}`;
-  const { branchWindow, branchTab } = await createBranchWorker(shareUrl);
+  const { branchWindow, branchTab } = await createBranchWorker(shareUrl, parentTab);
 
   const now = Date.now();
   const branch = {
@@ -152,6 +152,7 @@ async function handleCreateBranch(message, sender) {
     type: "GWB_BRANCH_STATE",
     branch
   });
+  await keepParentFocused(branch);
 
   return { branch };
 }
@@ -226,7 +227,7 @@ async function handleBranchReady(message, sender) {
   });
 
   if (branch) {
-    await minimizeBranchWindow(branch);
+    await keepParentFocused(branch);
     await notifyParent(branch, {
       type: "GWB_BRANCH_STATE",
       branch
@@ -306,7 +307,7 @@ async function handleBranchError(message, sender) {
   });
 
   if (branch) {
-    await minimizeBranchWindow(branch);
+    await keepParentFocused(branch);
     await notifyParent(branch, {
       type: "GWB_BRANCH_STATE",
       branch
@@ -462,13 +463,16 @@ function branchesForParentTab(state, parentTabId) {
     .sort((a, b) => a.createdAt - b.createdAt);
 }
 
-function branchesForParentConversation(state, parentTabId, parentConversationKey) {
+function branchesForParentConversation(state, parentTabId, parentConversationKey, options = {}) {
   return branchesForParentTab(state, parentTabId)
-    .filter((branch) => branchConversationKey(branch) === parentConversationKey);
+    .filter((branch) => branchConversationKey(branch) === parentConversationKey)
+    .filter((branch) => options.includeClosed || branch.status !== "closed");
 }
 
 function nextBranchNumber(state, parentTabId, parentConversationKey) {
-  const existing = branchesForParentConversation(state, parentTabId, parentConversationKey)
+  const existing = branchesForParentConversation(state, parentTabId, parentConversationKey, {
+    includeClosed: true
+  })
     .map((branch) => Number(branch.branchNumber) || 0);
   return existing.length ? Math.max(...existing) + 1 : 1;
 }
@@ -493,16 +497,16 @@ function conversationKeyFromUrl(url) {
   }
 }
 
-async function createBranchWorker(shareUrl) {
+async function createBranchWorker(shareUrl, parentTab) {
   try {
     const branchWindow = await chrome.windows.create({
       url: shareUrl,
       type: "popup",
-      focused: true,
-      width: 520,
-      height: 760,
-      left: 0,
-      top: 0
+      focused: false,
+      width: 1120,
+      height: 850,
+      left: 80,
+      top: 40
     });
     return {
       branchWindow,
@@ -516,7 +520,9 @@ async function createBranchWorker(shareUrl) {
     const branchWindow = await chrome.windows.create({
       url: shareUrl,
       type: "popup",
-      focused: true
+      focused: false,
+      width: 1120,
+      height: 850
     });
     return {
       branchWindow,
@@ -526,10 +532,14 @@ async function createBranchWorker(shareUrl) {
     console.warn("[Gemini Web Brancher] Popup window creation failed", error);
   }
 
-  const branchTab = await chrome.tabs.create({
+  const tabCreateOptions = {
     url: shareUrl,
-    active: true
-  });
+    active: false
+  };
+  if (parentTab && Number.isInteger(parentTab.windowId)) {
+    tabCreateOptions.windowId = parentTab.windowId;
+  }
+  const branchTab = await chrome.tabs.create(tabCreateOptions);
   return {
     branchWindow: null,
     branchTab
@@ -572,17 +582,20 @@ async function waitForBranchReady(branchId, timeoutMs) {
   throw new Error("Timed out waiting for branch worker to become ready.");
 }
 
-async function minimizeBranchWindow(branch) {
-  if (!branch || !Number.isInteger(branch.windowId)) {
+async function keepParentFocused(branch) {
+  if (!branch || !Number.isInteger(branch.parentTabId)) {
     return;
   }
 
   try {
-    await chrome.windows.update(branch.windowId, {
-      state: "minimized"
-    });
+    const parentTab = await chrome.tabs.get(branch.parentTabId);
+    if (Number.isInteger(parentTab.windowId)) {
+      await chrome.windows.update(parentTab.windowId, {
+        focused: true
+      });
+    }
   } catch (error) {
-    console.warn("[Gemini Web Brancher] Could not minimize branch window", error);
+    console.warn("[Gemini Web Brancher] Could not restore parent focus", error);
   }
 }
 

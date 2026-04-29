@@ -37,7 +37,7 @@ If Chrome says the manifest is missing or unreadable, open the folder you select
 4. Click `Branch` below the latest Gemini response.
 5. Wait while the extension creates and reads Gemini's public share link automatically.
 6. Type in the branch panel on the original page.
-7. Use `Open` on a branch panel if you need to inspect the background branch tab.
+7. Use `Open` on a branch panel if you need to inspect the minimized branch worker window.
 
 ## Privacy Reminder
 

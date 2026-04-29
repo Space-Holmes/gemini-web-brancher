@@ -12,6 +12,7 @@
   const state = {
     role: "unknown",
     branches: new Map(),
+    branchPanels: new Map(),
     branchMeta: null,
     root: null,
     panelList: null,
@@ -150,7 +151,7 @@
         parentTitle: document.title
       });
       upsertBranch(result.branch);
-      setStatus("Branch opened in a background tab.");
+      setStatus("Branch opened in a minimized branch window.");
     } catch (error) {
       setStatus(error.message || "Could not create branch.");
     } finally {
@@ -288,54 +289,85 @@
     }
 
     const branches = Array.from(state.branches.values()).sort((a, b) => a.createdAt - b.createdAt);
-    state.panelList.replaceChildren();
+    const activeIds = new Set(branches.map((branch) => branch.id));
 
-    for (const branch of branches) {
-      const panel = document.createElement("article");
-      panel.className = "gwb-panel";
-      panel.dataset.branchId = branch.id;
-      panel.innerHTML = `
-        <header class="gwb-panel-header">
-          <strong>${escapeHtml(branchLabel(branch))}</strong>
-          <span class="gwb-pill">${escapeHtml(branch.status || "opening")}</span>
-          <button class="gwb-small-button" type="button" data-action="open">Open</button>
-          <button class="gwb-icon-button" type="button" data-action="close" title="Close branch">x</button>
-        </header>
-        <div class="gwb-output" data-role="output"></div>
-        <form class="gwb-form">
-          <textarea class="gwb-input" rows="2" placeholder="Message this branch"></textarea>
-          <button class="gwb-send" type="submit">Send</button>
-        </form>
-        <div class="gwb-error" data-role="error"></div>
-      `;
+    branches.forEach((branch, index) => {
+      let panel = state.branchPanels.get(branch.id);
+      if (!panel) {
+        panel = createBranchPanel(branch.id);
+        state.branchPanels.set(branch.id, panel);
+      }
+      updateBranchPanel(panel, branch);
+      const currentAtIndex = state.panelList.children[index];
+      if (currentAtIndex !== panel) {
+        state.panelList.insertBefore(panel, currentAtIndex || null);
+      }
+    });
 
-      panel.querySelector("[data-role='output']").textContent = branch.lastOutput || "";
-      panel.querySelector("[data-role='error']").textContent = branch.error || "";
-      panel.querySelector(".gwb-form").addEventListener("submit", (event) => {
-        event.preventDefault();
-        const input = panel.querySelector(".gwb-input");
-        const prompt = input.value.trim();
-        if (!prompt) {
-          return;
-        }
-        input.value = "";
-        sendPrompt(branch.id, prompt).catch((error) => {
-          setStatus(error.message || "Could not send prompt.");
-        });
-      });
-      panel.querySelector("[data-action='close']").addEventListener("click", () => {
-        closeBranch(branch.id).catch((error) => {
-          setStatus(error.message || "Could not close branch.");
-        });
-      });
-      panel.querySelector("[data-action='open']").addEventListener("click", () => {
-        focusBranch(branch.id).catch((error) => {
-          setStatus(error.message || "Could not open branch.");
-        });
-      });
-
-      state.panelList.append(panel);
+    for (const [branchId, panel] of state.branchPanels.entries()) {
+      if (!activeIds.has(branchId)) {
+        panel.remove();
+        state.branchPanels.delete(branchId);
+      }
     }
+  }
+
+  function createBranchPanel(branchId) {
+    const panel = document.createElement("article");
+    panel.className = "gwb-panel";
+    panel.dataset.branchId = branchId;
+    panel.innerHTML = `
+      <header class="gwb-panel-header">
+        <strong data-role="title"></strong>
+        <span class="gwb-pill" data-role="status"></span>
+        <button class="gwb-small-button" type="button" data-action="open">Open</button>
+        <button class="gwb-icon-button" type="button" data-action="close" title="Close branch">x</button>
+      </header>
+      <div class="gwb-output" data-role="output"></div>
+      <form class="gwb-form">
+        <textarea class="gwb-input" rows="2" placeholder="Message this branch"></textarea>
+        <button class="gwb-send" type="submit">Send</button>
+      </form>
+      <div class="gwb-error" data-role="error"></div>
+    `;
+
+    panel.querySelector(".gwb-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const input = panel.querySelector(".gwb-input");
+      const prompt = input.value.trim();
+      if (!prompt) {
+        return;
+      }
+      input.value = "";
+      sendPrompt(branchId, prompt).catch((error) => {
+        setStatus(error.message || "Could not send prompt.");
+      });
+    });
+    panel.querySelector("[data-action='close']").addEventListener("click", () => {
+      closeBranch(branchId).catch((error) => {
+        setStatus(error.message || "Could not close branch.");
+      });
+    });
+    panel.querySelector("[data-action='open']").addEventListener("click", () => {
+      focusBranch(branchId).catch((error) => {
+        setStatus(error.message || "Could not open branch.");
+      });
+    });
+
+    return panel;
+  }
+
+  function updateBranchPanel(panel, branch) {
+    panel.querySelector("[data-role='title']").textContent = branchLabel(branch);
+    panel.querySelector("[data-role='status']").textContent = branch.status || "opening";
+    panel.querySelector("[data-role='output']").textContent = branch.lastOutput || "";
+    panel.querySelector("[data-role='error']").textContent = branch.error || "";
+
+    const input = panel.querySelector(".gwb-input");
+    const send = panel.querySelector(".gwb-send");
+    const isClosed = branch.status === "closed";
+    input.disabled = isClosed;
+    send.disabled = isClosed;
   }
 
   async function sendPrompt(branchId, prompt) {

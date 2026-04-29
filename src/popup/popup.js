@@ -30,8 +30,8 @@ async function render() {
         <span class="pill">${escapeHtml(branch.status || "unknown")}</span>
       </div>
       <div class="meta">${escapeHtml(formatTime(branch.createdAt))}</div>
-      <button type="button" data-action="open">Open branch tab</button>
-      <button type="button" data-action="close">Close branch tab</button>
+      <button type="button" data-action="open">Open branch window</button>
+      <button type="button" data-action="close">Close branch window</button>
     `;
     item.querySelector("[data-action='open']").addEventListener("click", async () => {
       await sendRuntime("GWB_FOCUS_BRANCH", {

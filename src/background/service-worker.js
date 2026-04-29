@@ -104,18 +104,7 @@ async function handleCreateBranch(message, sender) {
   const parentTabId = requireSenderTab(sender);
   const shareUrl = normalizeShareUrl(message.shareUrl);
   const parentTab = await chrome.tabs.get(parentTabId);
-  const parentIndex = Number.isInteger(parentTab.index) ? parentTab.index : undefined;
-
-  const tabOptions = {
-    url: shareUrl,
-    active: false,
-    openerTabId: parentTabId
-  };
-  if (parentIndex !== undefined) {
-    tabOptions.index = parentIndex + 1;
-  }
-
-  const branchTab = await chrome.tabs.create(tabOptions);
+  const { branchWindow, branchTab } = await createBranchWorker(shareUrl);
 
   const now = Date.now();
   const branch = {
@@ -126,6 +115,7 @@ async function handleCreateBranch(message, sender) {
     shareUrl,
     branchUrl: branchTab.url || shareUrl,
     tabId: branchTab.id,
+    windowId: branchWindow ? branchWindow.id : branchTab.windowId,
     status: "opening",
     createdAt: now,
     updatedAt: now,
@@ -157,7 +147,7 @@ async function handleSendPrompt(message) {
     throw new Error("Branch not found.");
   }
   if (!Number.isInteger(branch.tabId)) {
-    throw new Error("Branch tab is closed.");
+    throw new Error("Branch worker is closed.");
   }
 
   branch.status = "sending";
@@ -274,7 +264,7 @@ async function handleCloseBranch(message) {
     try {
       await chrome.tabs.remove(branch.tabId);
     } catch (error) {
-      console.warn("[Gemini Web Brancher] Could not close tab", error);
+      console.warn("[Gemini Web Brancher] Could not close branch worker", error);
     }
   }
 
@@ -296,15 +286,15 @@ async function handleFocusBranch(message) {
     throw new Error("Branch not found.");
   }
   if (!Number.isInteger(branch.tabId)) {
-    throw new Error("Branch tab is closed.");
+    throw new Error("Branch worker is closed.");
   }
 
-  const tab = await chrome.tabs.update(branch.tabId, {
-    active: true
-  });
-  if (tab.windowId !== undefined) {
-    await chrome.windows.update(tab.windowId, {
-      focused: true
+  const tab = await chrome.tabs.update(branch.tabId, { active: true });
+  const windowId = Number.isInteger(branch.windowId) ? branch.windowId : tab.windowId;
+  if (Number.isInteger(windowId)) {
+    await chrome.windows.update(windowId, {
+      focused: true,
+      state: "normal"
     });
   }
   return { branch };
@@ -359,7 +349,7 @@ async function updateBranchByTabId(tabId, patch) {
       const tab = await chrome.tabs.get(branch.tabId);
       branch.branchUrl = tab.url || branch.branchUrl;
     } catch {
-      // Tab may already be gone.
+      // Branch worker may already be gone.
     }
   }
   await saveState(state);
@@ -389,6 +379,68 @@ function branchesForParentTab(state, parentTabId) {
   return Object.values(state.branches)
     .filter((branch) => branch.parentTabId === parentTabId)
     .sort((a, b) => a.createdAt - b.createdAt);
+}
+
+async function createBranchWorker(shareUrl) {
+  try {
+    const branchWindow = await chrome.windows.create({
+      url: shareUrl,
+      type: "popup",
+      focused: false,
+      state: "minimized"
+    });
+    return {
+      branchWindow,
+      branchTab: await getWindowTab(branchWindow)
+    };
+  } catch (error) {
+    console.warn("[Gemini Web Brancher] Minimized window creation failed", error);
+  }
+
+  try {
+    const branchWindow = await chrome.windows.create({
+      url: shareUrl,
+      type: "popup",
+      focused: false
+    });
+    try {
+      if (Number.isInteger(branchWindow.id)) {
+        await chrome.windows.update(branchWindow.id, { state: "minimized" });
+      }
+    } catch (error) {
+      console.warn("[Gemini Web Brancher] Could not minimize branch window", error);
+    }
+    return {
+      branchWindow,
+      branchTab: await getWindowTab(branchWindow)
+    };
+  } catch (error) {
+    console.warn("[Gemini Web Brancher] Popup window creation failed", error);
+  }
+
+  const branchTab = await chrome.tabs.create({
+    url: shareUrl,
+    active: false
+  });
+  return {
+    branchWindow: null,
+    branchTab
+  };
+}
+
+async function getWindowTab(window) {
+  if (window && Array.isArray(window.tabs) && window.tabs[0] && Number.isInteger(window.tabs[0].id)) {
+    return window.tabs[0];
+  }
+
+  if (window && Number.isInteger(window.id)) {
+    const tabs = await chrome.tabs.query({ windowId: window.id });
+    if (tabs[0] && Number.isInteger(tabs[0].id)) {
+      return tabs[0];
+    }
+  }
+
+  throw new Error("Could not create branch worker window.");
 }
 
 function requireSenderTab(sender) {

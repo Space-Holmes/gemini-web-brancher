@@ -1,11 +1,8 @@
 .gwb-branch-root {
   box-sizing: border-box;
-  width: min(1180px, calc(100vw - 48px));
-  max-width: calc(100vw - 48px);
-  margin: 12px 0 20px;
-  position: relative;
-  left: 50%;
-  transform: translateX(-50%);
+  width: calc(100vw - 48px);
+  max-width: none;
+  margin: 12px calc(50% - 50vw + 24px) 20px;
   color: #202124;
   font: 13px/1.45 Google Sans, Roboto, Arial, sans-serif;
 }
@@ -244,6 +241,7 @@
   .gwb-branch-root {
     width: calc(100vw - 24px);
     max-width: calc(100vw - 24px);
+    margin: 12px calc(50% - 50vw + 12px) 20px;
   }
 
   .gwb-panels,

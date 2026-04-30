@@ -287,17 +287,24 @@
       });
       upsertBranch(result.branch);
       let trunkMarked = false;
-      try {
-        trunkMarked = await markCurrentConversationAsTrunk({ silent: true });
-      } catch (renameError) {
-        console.warn("[Gemini Web Brancher] Could not mark trunk conversation", renameError);
+      const shouldMarkTrunk = Number(result.branch && result.branch.branchNumber) === 1 && !isCurrentConversationMarkedTrunk();
+      if (shouldMarkTrunk) {
+        try {
+          trunkMarked = await markCurrentConversationAsTrunk({ silent: true });
+        } catch (renameError) {
+          console.warn("[Gemini Web Brancher] Could not mark trunk conversation", renameError);
+        }
       }
-      setStatus(trunkMarked
-        ? "Branch worker opened. Trunk marked."
-        : "Branch worker opened. Use Mark Trunk if the title was not updated.", {
-          sticky: !trunkMarked,
-          tone: trunkMarked ? "" : "error"
+      if (trunkMarked) {
+        setStatus("Branch worker opened. Trunk marked.");
+      } else if (shouldMarkTrunk) {
+        setStatus("Branch worker opened. Use Mark Trunk if the title was not updated.", {
+          sticky: true,
+          tone: "error"
         });
+      } else {
+        setStatus("Branch worker opened.");
+      }
     } catch (error) {
       setStatus(error.message || "Could not create branch.", { sticky: true, tone: "error" });
     } finally {
@@ -1108,6 +1115,15 @@
     const cleaned = cleanConversationTitle(title);
     const base = cleaned.replace(/\s*--TRUNK\s*$/i, "").trim();
     return `${base || "Gemini"}${suffix}`;
+  }
+
+  function isCurrentConversationMarkedTrunk() {
+    const titles = [
+      document.title,
+      ...findCurrentConversationContainers().map(getElementVisibleLabel)
+    ].map(cleanConversationTitle);
+
+    return titles.some((title) => /\s*--TRUNK\s*$/i.test(title));
   }
 
   function isLikelyConversationTitle(title) {

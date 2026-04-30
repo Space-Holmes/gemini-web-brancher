@@ -8,6 +8,7 @@
   const RESPONSE_IDLE_MS = 8000;
   const SHARE_LINK_TIMEOUT_MS = 30000;
   const SHARE_DOM_FALLBACK_DELAY_MS = 8000;
+  const TRUNK_MARK_STORAGE_PREFIX = "gwb:trunk-mark-attempted:";
   const SHARE_URL_PATTERN = /(?:https?:\/\/)?(?:g\.co\/gemini\/share\/|gemini\.google\.com\/share\/|gemini\.google\.com\/app\/[A-Za-z0-9_-]+\/share\/)[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]+/i;
 
   const state = {
@@ -275,6 +276,8 @@
     const button = event.currentTarget;
     button.disabled = true;
     setStatus("Creating branch...");
+    const creationConversationKey = state.parentConversationKey;
+    const branchCountBeforeCreate = currentConversationBranches().length;
 
     try {
       const shareUrl = await extractShareUrl();
@@ -287,10 +290,14 @@
       });
       upsertBranch(result.branch);
       let trunkMarked = false;
-      const shouldMarkTrunk = Number(result.branch && result.branch.branchNumber) === 1 && !isCurrentConversationMarkedTrunk();
+      const shouldMarkTrunk = shouldAutoMarkTrunk(creationConversationKey, branchCountBeforeCreate);
       if (shouldMarkTrunk) {
+        recordTrunkMarkAttempt(creationConversationKey);
         try {
-          trunkMarked = await markCurrentConversationAsTrunk({ silent: true });
+          trunkMarked = await markCurrentConversationAsTrunk({
+            expectedConversationKey: creationConversationKey,
+            silent: true
+          });
         } catch (renameError) {
           console.warn("[Gemini Web Brancher] Could not mark trunk conversation", renameError);
         }
@@ -668,7 +675,7 @@
     if (!options.silent) {
       setStatus("Marking trunk...");
     }
-    const renamed = await renameCurrentConversationWithSuffix("--TRUNK");
+    const renamed = await renameCurrentConversationWithSuffix("--TRUNK", options);
     if (!options.silent) {
       setStatus(renamed ? "Trunk marked." : "Rename controls not found.", {
         sticky: !renamed,
@@ -678,10 +685,21 @@
     return renamed;
   }
 
-  async function renameCurrentConversationWithSuffix(suffix) {
+  async function renameCurrentConversationWithSuffix(suffix, options = {}) {
+    if (options.expectedConversationKey && !isCurrentParentConversation(options.expectedConversationKey)) {
+      return false;
+    }
+    if (isCurrentConversationMarkedTrunk()) {
+      return true;
+    }
+
     for (let attempt = 0; attempt < 4; attempt += 1) {
       await revealConversationHistory();
       await sleep(attempt === 0 ? 300 : 800);
+
+      if (options.expectedConversationKey && !isCurrentParentConversation(options.expectedConversationKey)) {
+        return false;
+      }
 
       const renameAction = await openCurrentConversationActionMenu();
       if (!renameAction) {
@@ -811,8 +829,6 @@
       }
     }
 
-    containers.push(...findConversationContainersByTitleText());
-
     for (const selected of queryAllDeep(document, "[aria-current='page'], [aria-selected='true'], [data-active='true'], [class*='selected' i], [class*='active' i]")) {
       if (!isVisible(selected) || selected.closest(`#${ROOT_ID}`) || isAccountOrChromeEntry(selected)) {
         continue;
@@ -829,28 +845,6 @@
       .filter((element) => element instanceof Element)
       .filter((element) => !element.closest(`#${ROOT_ID}`))
       .slice(0, 8);
-  }
-
-  function findConversationContainersByTitleText() {
-    const titles = [
-      state.branchMeta && state.branchMeta.parentTitle,
-      document.title
-    ]
-      .map(cleanConversationTitle)
-      .filter(isLikelyConversationTitle);
-
-    if (!titles.length) {
-      return [];
-    }
-
-    return queryAllDeep(document, "aside a, nav a, [role='navigation'] a, [role='listitem'], li, a[href*='/app/']")
-      .filter(isVisible)
-      .filter((element) => !element.closest(`#${ROOT_ID}`))
-      .filter((element) => {
-        const label = cleanConversationTitle(getElementVisibleLabel(element));
-        return titles.some((title) => label === title || label.includes(title) || title.includes(label));
-      })
-      .map((element) => element.closest("[role='listitem'], li, mat-list-item, [data-test-id], [data-testid], .conversation, .chat, .history") || element);
   }
 
   function findConversationMenuButton(container) {
@@ -1124,6 +1118,41 @@
     ].map(cleanConversationTitle);
 
     return titles.some((title) => /\s*--TRUNK\s*$/i.test(title));
+  }
+
+  function shouldAutoMarkTrunk(conversationKey, branchCountBeforeCreate) {
+    return (
+      branchCountBeforeCreate === 0 &&
+      isCurrentParentConversation(conversationKey) &&
+      !isTrunkMarkAttempted(conversationKey) &&
+      !isCurrentConversationMarkedTrunk()
+    );
+  }
+
+  function isCurrentParentConversation(conversationKey) {
+    return (
+      state.role === "parent" &&
+      location.hostname === "gemini.google.com" &&
+      location.pathname.startsWith("/app/") &&
+      state.parentConversationKey === conversationKey &&
+      getParentConversationKey(location.href) === conversationKey
+    );
+  }
+
+  function isTrunkMarkAttempted(conversationKey) {
+    try {
+      return localStorage.getItem(`${TRUNK_MARK_STORAGE_PREFIX}${conversationKey}`) === "1";
+    } catch {
+      return false;
+    }
+  }
+
+  function recordTrunkMarkAttempt(conversationKey) {
+    try {
+      localStorage.setItem(`${TRUNK_MARK_STORAGE_PREFIX}${conversationKey}`, "1");
+    } catch {
+      // Storage can be disabled by the browser; the branch flow should continue.
+    }
   }
 
   function isLikelyConversationTitle(title) {

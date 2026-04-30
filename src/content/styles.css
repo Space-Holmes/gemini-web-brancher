@@ -1,8 +1,8 @@
 .gwb-branch-root {
   box-sizing: border-box;
-  width: calc(100vw - 48px);
+  width: calc(100vw - 160px);
   max-width: none;
-  margin: 12px calc(50% - 50vw + 24px) 20px;
+  margin: 12px calc(50% - 50vw + 80px) 20px;
   color: #202124;
   font: 13px/1.45 Google Sans, Roboto, Arial, sans-serif;
 }
@@ -235,6 +235,13 @@
 
 .gwb-error:empty {
   display: none;
+}
+
+@media (max-width: 1000px) {
+  .gwb-branch-root {
+    width: calc(100vw - 64px);
+    margin: 12px calc(50% - 50vw + 32px) 20px;
+  }
 }
 
 @media (max-width: 720px) {

@@ -8,8 +8,10 @@ const DEFAULT_STATE = {
   branches: {}
 };
 
+let stateMutationQueue = Promise.resolve();
+
 chrome.runtime.onInstalled.addListener(() => {
-  loadState().then(saveState).catch(console.error);
+  withStateMutation((state) => state).catch(console.error);
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
@@ -83,80 +85,82 @@ async function handleMessage(message, sender) {
 
 async function handleContentReady(message, sender) {
   const tabId = requireSenderTab(sender);
-  const state = await loadState();
-  const branch = findBranchByTabId(state, tabId);
 
-  if (branch) {
-    if (message.url && branch.branchUrl !== message.url) {
-      branch.branchUrl = message.url;
-      branch.updatedAt = Date.now();
-      await saveState(state);
+  return withStateMutation((state) => {
+    const branch = findBranchByTabId(state, tabId);
+
+    if (branch) {
+      if (message.url && branch.branchUrl !== message.url) {
+        branch.branchUrl = message.url;
+        branch.updatedAt = Date.now();
+      }
+      return {
+        role: "branch",
+        branch
+      };
     }
-    return {
-      role: "branch",
-      branch
-    };
-  }
 
-  return {
-    role: "parent",
-    branches: await registerParentTabForConversation(
-      state,
-      tabId,
-      message.parentConversationKey || conversationKeyFromUrl(message.url)
-    )
-  };
+    return {
+      role: "parent",
+      branches: registerParentTabForConversation(
+        state,
+        tabId,
+        message.parentConversationKey || conversationKeyFromUrl(message.url)
+      )
+    };
+  });
 }
 
 async function handleListBranches(message, sender) {
   const parentTabId = requireSenderTab(sender);
-  const state = await loadState();
-  return {
-    branches: await registerParentTabForConversation(
+  return withStateMutation((state) => ({
+    branches: registerParentTabForConversation(
       state,
       parentTabId,
       message.parentConversationKey || conversationKeyFromUrl(message.url)
     )
-  };
+  }));
 }
 
 async function handleCreateBranch(message, sender) {
   const parentTabId = requireSenderTab(sender);
   const shareUrl = normalizeShareUrl(message.shareUrl);
   const parentTab = await chrome.tabs.get(parentTabId);
-  const state = await loadState();
   const parentUrl = message.parentUrl || parentTab.url || "";
   const parentConversationKey = message.parentConversationKey || conversationKeyFromUrl(parentUrl);
-  const branchNumber = nextBranchNumber(state, parentConversationKey);
-  const branchSuffix = `_branch${branchNumber}`;
   const { branchWindow, branchTab, workerMode } = await createBranchWorker(parentTab);
 
-  const now = Date.now();
-  const branch = {
-    id: createId(),
-    parentTabId,
-    parentTabIds: [parentTabId],
-    parentUrl,
-    parentTitle: message.parentTitle || parentTab.title || "",
-    parentConversationKey,
-    branchNumber,
-    branchSuffix,
-    shareUrl,
-    branchUrl: shareUrl,
-    tabId: branchTab.id,
-    windowId: branchWindow ? branchWindow.id : null,
-    workerMode,
-    status: "opening",
-    createdAt: now,
-    updatedAt: now,
-    lastPrompt: "",
-    lastOutput: "",
-    messages: [],
-    error: ""
-  };
+  const branch = await withStateMutation((state) => {
+    const branchNumber = nextBranchNumber(state, parentConversationKey);
+    const branchSuffix = `_branch${branchNumber}`;
+    const now = Date.now();
+    const nextBranch = {
+      id: createId(),
+      parentTabId,
+      parentTabIds: [parentTabId],
+      parentUrl,
+      parentTitle: message.parentTitle || parentTab.title || "",
+      parentConversationKey,
+      branchNumber,
+      branchSuffix,
+      shareUrl,
+      branchUrl: shareUrl,
+      tabId: branchTab.id,
+      windowId: branchWindow ? branchWindow.id : null,
+      workerMode,
+      status: "opening",
+      createdAt: now,
+      updatedAt: now,
+      lastPrompt: "",
+      lastOutput: "",
+      messages: [],
+      error: ""
+    };
 
-  state.branches[branch.id] = branch;
-  await saveState(state);
+    state.branches[nextBranch.id] = nextBranch;
+    return nextBranch;
+  });
+
   await navigateBranchWorker(branch, shareUrl);
   await notifyParent(branch, {
     type: "GWB_BRANCH_STATE",
@@ -172,7 +176,7 @@ async function handleSendPrompt(message) {
     throw new Error("Prompt is empty.");
   }
 
-  let state = await loadState();
+  let state = await readState();
   let branch = state.branches[message.branchId];
   if (!branch) {
     throw new Error("Branch not found.");
@@ -191,25 +195,36 @@ async function handleSendPrompt(message) {
       }
     });
     branch = await waitForBranchReady(branch.id, BRANCH_READY_TIMEOUT_MS);
-    state = await loadState();
+    state = await readState();
     branch = state.branches[message.branchId] || branch;
   }
 
   const turnId = createId();
-  ensureBranchMessages(branch).push({
-    id: turnId,
-    prompt,
-    output: "",
-    outputHtml: "",
-    createdAt: Date.now(),
-    updatedAt: Date.now()
+  branch = await withStateMutation((state) => {
+    const branch = state.branches[message.branchId];
+    if (!branch) {
+      throw new Error("Branch not found.");
+    }
+    if (!Number.isInteger(branch.tabId)) {
+      throw new Error("Branch worker is closed.");
+    }
+
+    ensureBranchMessages(branch).push({
+      id: turnId,
+      prompt,
+      output: "",
+      outputHtml: "",
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    });
+    branch.activeTurnId = turnId;
+    branch.status = "sending";
+    branch.lastPrompt = prompt;
+    branch.error = "";
+    branch.updatedAt = Date.now();
+    return branch;
   });
-  branch.activeTurnId = turnId;
-  branch.status = "sending";
-  branch.lastPrompt = prompt;
-  branch.error = "";
-  branch.updatedAt = Date.now();
-  await saveState(state);
+
   await notifyParent(branch, {
     type: "GWB_BRANCH_STATE",
     branch
@@ -326,7 +341,7 @@ async function handleBranchError(message, sender) {
 }
 
 async function handleCloseBranch(message) {
-  const state = await loadState();
+  const state = await readState();
   const branch = state.branches[message.branchId];
   if (!branch) {
     throw new Error("Branch not found.");
@@ -340,19 +355,26 @@ async function handleCloseBranch(message) {
     }
   }
 
-  branch.status = "closed";
-  branch.tabId = null;
-  branch.updatedAt = Date.now();
-  await saveState(state);
+  const closedBranch = await withStateMutation((state) => {
+    const branch = state.branches[message.branchId];
+    if (!branch) {
+      throw new Error("Branch not found.");
+    }
+    branch.status = "closed";
+    branch.tabId = null;
+    branch.updatedAt = Date.now();
+    return branch;
+  });
+
   await notifyParent(branch, {
     type: "GWB_BRANCH_STATE",
-    branch
+    branch: closedBranch
   });
-  return { branch };
+  return { branch: closedBranch };
 }
 
 async function handleFocusBranch(message) {
-  const state = await loadState();
+  const state = await readState();
   const branch = state.branches[message.branchId];
   if (!branch) {
     throw new Error("Branch not found.");
@@ -372,22 +394,24 @@ async function handleFocusBranch(message) {
 }
 
 async function handleListAllBranches() {
-  const state = await loadState();
+  const state = await readState();
   return {
     branches: Object.values(state.branches).sort((a, b) => b.createdAt - a.createdAt)
   };
 }
 
 async function handleClearClosed() {
-  const state = await loadState();
-  for (const [id, branch] of Object.entries(state.branches)) {
-    if (branch.status === "closed" || !branch.tabId) {
-      delete state.branches[id];
+  const branches = await withStateMutation((state) => {
+    for (const [id, branch] of Object.entries(state.branches)) {
+      if (branch.status === "closed" || !branch.tabId) {
+        delete state.branches[id];
+      }
     }
-  }
-  await saveState(state);
+    return Object.values(state.branches).sort((a, b) => b.createdAt - a.createdAt);
+  });
+
   return {
-    branches: Object.values(state.branches).sort((a, b) => b.createdAt - a.createdAt)
+    branches
   };
 }
 
@@ -407,27 +431,43 @@ async function saveState(state) {
   });
 }
 
-async function updateBranchByTabId(tabId, patch, mutate) {
-  const state = await loadState();
-  const branch = findBranchByTabId(state, tabId);
-  if (!branch) {
-    return null;
-  }
+async function readState() {
+  await stateMutationQueue;
+  return loadState();
+}
 
-  Object.assign(branch, patch);
-  if (mutate) {
-    mutate(branch);
-  }
-  if (!patch.branchUrl && Number.isInteger(branch.tabId)) {
-    try {
-      const tab = await chrome.tabs.get(branch.tabId);
-      branch.branchUrl = tab.url || branch.branchUrl;
-    } catch {
-      // Branch worker may already be gone.
+function withStateMutation(mutator) {
+  const run = stateMutationQueue.then(async () => {
+    const state = await loadState();
+    const result = await mutator(state);
+    await saveState(state);
+    return result;
+  });
+  stateMutationQueue = run.catch(() => {});
+  return run;
+}
+
+async function updateBranchByTabId(tabId, patch, mutate) {
+  return withStateMutation(async (state) => {
+    const branch = findBranchByTabId(state, tabId);
+    if (!branch) {
+      return null;
     }
-  }
-  await saveState(state);
-  return branch;
+
+    Object.assign(branch, patch);
+    if (mutate) {
+      mutate(branch);
+    }
+    if (!patch.branchUrl && Number.isInteger(branch.tabId)) {
+      try {
+        const tab = await chrome.tabs.get(branch.tabId);
+        branch.branchUrl = tab.url || branch.branchUrl;
+      } catch {
+        // Branch worker may already be gone.
+      }
+    }
+    return branch;
+  });
 }
 
 function ensureBranchMessages(branch) {
@@ -471,20 +511,15 @@ function findBranchByTabId(state, tabId) {
   return Object.values(state.branches).find((branch) => branch.tabId === tabId) || null;
 }
 
-async function registerParentTabForConversation(state, parentTabId, parentConversationKey) {
+function registerParentTabForConversation(state, parentTabId, parentConversationKey) {
   const branches = branchesForParentConversation(state, parentConversationKey);
-  let changed = false;
   for (const branch of branches) {
     const parentTabIds = branchParentTabIds(branch);
     if (!parentTabIds.includes(parentTabId)) {
       branch.parentTabIds = [...parentTabIds, parentTabId];
       branch.parentTabId = parentTabId;
       branch.updatedAt = Date.now();
-      changed = true;
     }
-  }
-  if (changed) {
-    await saveState(state);
   }
   return branches;
 }
@@ -611,7 +646,7 @@ async function waitForBranchReady(branchId, timeoutMs) {
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < timeoutMs) {
-    const state = await loadState();
+    const state = await readState();
     const branch = state.branches[branchId];
     if (!branch) {
       throw new Error("Branch not found.");

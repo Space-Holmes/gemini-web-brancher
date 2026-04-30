@@ -54,6 +54,9 @@ async function handleMessage(message, sender) {
     case "GWB_SEND_PROMPT":
       return handleSendPrompt(message, sender);
 
+    case "GWB_POLL_BRANCH_OUTPUT":
+      return handlePollBranchOutput(message);
+
     case "GWB_BRANCH_READY":
       return handleBranchReady(message, sender);
 
@@ -259,6 +262,32 @@ async function handleBranchReady(message, sender) {
   }
 
   return { branch };
+}
+
+async function handlePollBranchOutput(message) {
+  const requestedIds = new Set(Array.isArray(message.branchIds) ? message.branchIds : []);
+  const state = await readState();
+  const branches = Object.values(state.branches)
+    .filter((branch) => Number.isInteger(branch.tabId))
+    .filter((branch) => branch.status === "sending" || branch.status === "streaming")
+    .filter((branch) => !requestedIds.size || requestedIds.has(branch.id));
+
+  await Promise.all(branches.map(async (branch) => {
+    try {
+      await chrome.tabs.sendMessage(branch.tabId, {
+        source: SOURCE,
+        type: "GWB_BRANCH_POLL_OUTPUT",
+        branchId: branch.id,
+        branch
+      });
+    } catch (error) {
+      console.warn("[Gemini Web Brancher] Could not poll branch worker", error);
+    }
+  }));
+
+  return {
+    polled: branches.length
+  };
 }
 
 async function handleBranchOutput(message, sender) {

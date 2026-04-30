@@ -5,7 +5,10 @@
   const ROOT_CLASS = "gwb-branch-root";
   const ROOT_ID = `gwb-branch-root-${chrome.runtime.id}`;
   const BUTTON_ID = `gwb-branch-button-${chrome.runtime.id}`;
-  const RESPONSE_IDLE_MS = 8000;
+  const RESPONSE_IDLE_MS = 15000;
+  const RESPONSE_GENERATING_GRACE_MS = 60000;
+  const BRANCH_SUPERVISOR_INTERVAL_MS = 1500;
+  const BRANCH_RESPONSE_TIMEOUT_MS = 10 * 60 * 1000;
   const SHARE_LINK_TIMEOUT_MS = 30000;
   const SHARE_DOM_FALLBACK_DELAY_MS = 8000;
   const SHARE_URL_PATTERN = /(?:https?:\/\/)?(?:g\.co\/gemini\/share\/|gemini\.google\.com\/share\/|gemini\.google\.com\/app\/[A-Za-z0-9_-]+\/share\/)[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]+/i;
@@ -23,12 +26,15 @@
     parentConversationKey: "",
     parentUrl: "",
     branchListRequestToken: 0,
+    branchSupervisorPoller: null,
     branchOutputTimer: null,
     branchOutputPoller: null,
     branchLastOutput: "",
     branchLastHtml: "",
     branchBaselineOutput: "",
     branchCurrentTurnId: "",
+    branchResponseStartedAt: 0,
+    branchLastRealOutputAt: 0,
     branchStreaming: false
   };
 
@@ -86,6 +92,7 @@
   function runParentTab() {
     installRuntimeListener();
     installParentLocationWatcher();
+    startBranchSupervisor();
     attachParentUi();
     state.attachObserver = new MutationObserver(debounce(attachParentUi, 600));
     state.attachObserver.observe(document.documentElement, {
@@ -152,6 +159,32 @@
     renderBranches();
   }
 
+  function startBranchSupervisor() {
+    if (state.branchSupervisorPoller) {
+      return;
+    }
+    state.branchSupervisorPoller = setInterval(() => {
+      pollActiveBranchWorkers().catch((error) => {
+        console.warn("[Gemini Web Brancher] Branch supervisor poll failed", error);
+      });
+    }, BRANCH_SUPERVISOR_INTERVAL_MS);
+  }
+
+  async function pollActiveBranchWorkers() {
+    if (state.role !== "parent") {
+      return;
+    }
+    const branchIds = currentConversationBranches()
+      .filter((branch) => branch.status === "sending" || branch.status === "streaming")
+      .map((branch) => branch.id);
+    if (!branchIds.length) {
+      return;
+    }
+    await sendRuntime("GWB_POLL_BRANCH_OUTPUT", {
+      branchIds
+    });
+  }
+
   async function runBranchTab() {
     installRuntimeListener();
     await sleep(1200);
@@ -196,6 +229,18 @@
             });
           });
         return true;
+      }
+
+      if (message.type === "GWB_BRANCH_POLL_OUTPUT") {
+        enterBranchMode(message.branch || {
+          id: message.branchId
+        });
+        scanBranchOutput();
+        sendResponse({
+          ok: true,
+          streaming: state.branchStreaming
+        });
+        return false;
       }
 
       return false;
@@ -1114,6 +1159,8 @@
     const before = findLatestModelResponse();
     state.branchBaselineOutput = before ? normalizeText(before.innerText || before.textContent || "") : "";
     state.branchCurrentTurnId = turnId || "";
+    state.branchResponseStartedAt = Date.now();
+    state.branchLastRealOutputAt = 0;
     state.branchStreaming = true;
     focusAndSetText(editor, prompt);
     await sleep(250);
@@ -1161,15 +1208,25 @@
     if (!state.branchStreaming) {
       return;
     }
+    if (state.branchResponseStartedAt && Date.now() - state.branchResponseStartedAt > BRANCH_RESPONSE_TIMEOUT_MS && !state.branchLastOutput) {
+      state.branchStreaming = false;
+      stopBranchOutputPolling();
+      reportBranchError(new Error("Timed out waiting for Gemini response."));
+      return;
+    }
 
     const latest = findLatestModelResponse();
     const output = latest ? normalizeText(latest.innerText || latest.textContent || "") : "";
     if (!output || output === state.branchBaselineOutput || output === state.branchLastOutput) {
       return;
     }
+    if (isTransientGeminiStatus(output, latest)) {
+      return;
+    }
 
     state.branchLastOutput = output;
     state.branchLastHtml = latest ? sanitizeHtml(latest.innerHTML || "") : "";
+    state.branchLastRealOutputAt = Date.now();
     sendRuntime("GWB_BRANCH_OUTPUT", {
       branchId: state.branchMeta && state.branchMeta.id,
       turnId: state.branchCurrentTurnId,
@@ -1178,18 +1235,35 @@
       url: location.href
     }).catch(console.error);
 
+    scheduleBranchDoneCheck();
+  }
+
+  function scheduleBranchDoneCheck() {
     clearTimeout(state.branchOutputTimer);
     state.branchOutputTimer = setTimeout(() => {
-      state.branchStreaming = false;
-      stopBranchOutputPolling();
-      sendRuntime("GWB_BRANCH_DONE", {
-        branchId: state.branchMeta && state.branchMeta.id,
-        turnId: state.branchCurrentTurnId,
-        output: state.branchLastOutput,
-        html: state.branchLastHtml,
-        url: location.href
-      }).catch(console.error);
+      finishBranchIfIdle();
     }, RESPONSE_IDLE_MS);
+  }
+
+  function finishBranchIfIdle() {
+    if (!state.branchStreaming || !state.branchLastOutput) {
+      return;
+    }
+    const idleMs = Date.now() - state.branchLastRealOutputAt;
+    if (idleMs < RESPONSE_IDLE_MS - 250 || (idleMs < RESPONSE_GENERATING_GRACE_MS && isGeminiStillGenerating())) {
+      scheduleBranchDoneCheck();
+      return;
+    }
+
+    state.branchStreaming = false;
+    stopBranchOutputPolling();
+    sendRuntime("GWB_BRANCH_DONE", {
+      branchId: state.branchMeta && state.branchMeta.id,
+      turnId: state.branchCurrentTurnId,
+      output: state.branchLastOutput,
+      html: state.branchLastHtml,
+      url: location.href
+    }).catch(console.error);
   }
 
   async function reportBranchError(error) {
@@ -1221,6 +1295,60 @@
       .filter((element) => normalizeText(element.innerText || element.textContent || "").length > 24);
 
     return candidates[candidates.length - 1] || null;
+  }
+
+  function isTransientGeminiStatus(output, element) {
+    const normalized = normalizeText(output)
+      .toLowerCase()
+      .replace(/[’`]/g, "'")
+      .replace(/\s+/g, " ");
+    if (!normalized || normalized.length > 180 || normalized.includes("\n")) {
+      return false;
+    }
+
+    const transientPatterns = [
+      /understanding (the )?(user'?s|your) input/,
+      /understanding input/,
+      /thinking/,
+      /generating/,
+      /analy[sz]ing/,
+      /working on it/,
+      /just a sec/,
+      /loading/,
+      /正在(理解|思考|生成|分析|处理)/,
+      /理解.*输入/,
+      /思考中/,
+      /生成中/,
+      /分析中/
+    ];
+    if (transientPatterns.some((pattern) => pattern.test(normalized))) {
+      return true;
+    }
+
+    if (element) {
+      const label = getElementLabel(element).toLowerCase();
+      return /progress|loading|thinking|generating|正在|处理中/.test(label) && normalized.length < 80;
+    }
+    return false;
+  }
+
+  function isGeminiStillGenerating() {
+    const stop = findButtonByTerms([
+      "stop generating",
+      "stop response",
+      "stop",
+      "停止生成",
+      "停止回答",
+      "停止回复",
+      "停止"
+    ]);
+    if (stop && isEnabled(stop) && !stop.closest(`#${ROOT_ID}`)) {
+      return true;
+    }
+
+    return queryAllDeep(document, "[aria-busy='true'], [role='progressbar'], mat-progress-spinner, mat-spinner, [class*='spinner' i], [class*='loading' i]")
+      .filter((element) => !element.closest(`#${ROOT_ID}`))
+      .some((element) => state.role === "branch" || isVisible(element));
   }
 
   function pickInsertionTarget(anchor) {

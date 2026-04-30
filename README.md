@@ -15,6 +15,7 @@
 - Branch 会持续等待 Gemini 生成分享链接，并自动完成链接提取。
 - 可用页面里的 Mark Trunk 按钮把当前主对话标题标记为 `--TRUNK`；创建 branch 时不会自动弹出重命名窗口。
 - Branch 面板会按当前主对话分组显示，并最多三列并排显示，桌面端宽度为页面宽度减去 160px。
+- 主页面会主动轮询正在生成的 branch worker，并忽略 Gemini 的中间理解/思考状态，等真实回答稳定后才结束回传。
 - 可从 branch 面板或扩展弹窗打开 branch worker 窗口进行人工排查。
 
 ## 重要限制
@@ -81,7 +82,7 @@ npm run package
 - 更强的 Gemini DOM selector 适配。
 - 更强的自动复制分享链接 fallback。
 - 更强的主对话 `--TRUNK` 手动标记。
-- 更准确的流式输出结束检测。
+- 更准确的流式输出结束检测和中间状态识别。
 - 支持导出 branch 树。
 
 ## 隐私

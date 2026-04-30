@@ -29,13 +29,7 @@
     branchLastHtml: "",
     branchBaselineOutput: "",
     branchCurrentTurnId: "",
-    branchStreaming: false,
-    branchRenamePromise: null,
-    branchRenameDone: false,
-    branchRenameCancelled: false,
-    branchRenameRunning: false,
-    branchRenameAttempts: 0,
-    branchRenameTimer: null
+    branchStreaming: false
   };
 
   init().catch((error) => {
@@ -162,13 +156,10 @@
     installRuntimeListener();
     await sleep(1200);
     await prepareBranchComposer(60000);
-    state.branchRenameDone = false;
-    state.branchRenameCancelled = false;
     await sendRuntime("GWB_BRANCH_READY", {
       branchId: state.branchMeta.id,
       url: location.href
     });
-    scheduleBranchRenameWhenIdle(1500);
     observeBranchOutput();
   }
 
@@ -199,19 +190,6 @@
           .then(() => sendResponse({ ok: true }))
           .catch((error) => {
             reportBranchError(error);
-            sendResponse({
-              ok: false,
-              error: error.message || String(error)
-            });
-          });
-        return true;
-      }
-
-      if (message.type === "GWB_BRANCH_RENAME_NOW") {
-        enterBranchMode(message.branch || {});
-        renameBranchNow()
-          .then((renamed) => sendResponse({ ok: true, renamed }))
-          .catch((error) => {
             sendResponse({
               ok: false,
               error: error.message || String(error)
@@ -262,6 +240,7 @@
       state.root.innerHTML = `
         <div class="gwb-toolbar">
           <button id="${BUTTON_ID}" class="gwb-branch-button" type="button">Branch</button>
+          <button class="gwb-small-button" type="button" data-action="mark-trunk">Mark Trunk</button>
           <span class="gwb-status" aria-live="polite"></span>
         </div>
         <div class="gwb-panels"></div>
@@ -269,6 +248,11 @@
       state.statusText = state.root.querySelector(".gwb-status");
       state.panelList = state.root.querySelector(".gwb-panels");
       state.root.querySelector(`#${BUTTON_ID}`).addEventListener("click", createBranchFromCurrentChat);
+      state.root.querySelector("[data-action='mark-trunk']").addEventListener("click", () => {
+        markCurrentConversationAsTrunk().catch((error) => {
+          setStatus(error.message || "Could not mark trunk.", { sticky: true, tone: "error" });
+        });
+      });
     }
 
     const insertionTarget = pickInsertionTarget(anchor);
@@ -302,7 +286,18 @@
         parentConversationKey: state.parentConversationKey
       });
       upsertBranch(result.branch);
-      setStatus("Branch worker opened in a background window.");
+      let trunkMarked = false;
+      try {
+        trunkMarked = await markCurrentConversationAsTrunk({ silent: true });
+      } catch (renameError) {
+        console.warn("[Gemini Web Brancher] Could not mark trunk conversation", renameError);
+      }
+      setStatus(trunkMarked
+        ? "Branch worker opened. Trunk marked."
+        : "Branch worker opened. Use Mark Trunk if the title was not updated.", {
+          sticky: !trunkMarked,
+          tone: trunkMarked ? "" : "error"
+        });
     } catch (error) {
       setStatus(error.message || "Could not create branch.", { sticky: true, tone: "error" });
     } finally {
@@ -513,6 +508,7 @@
     }
 
     const branches = currentConversationBranches();
+    state.panelList.dataset.count = String(Math.min(branches.length, 3));
     const activeIds = new Set(branches.map((branch) => branch.id));
 
     branches.forEach((branch, index) => {
@@ -545,7 +541,6 @@
         <strong data-role="title"></strong>
         <span class="gwb-pill" data-role="status"></span>
         <button class="gwb-small-button" type="button" data-action="open">Open</button>
-        <button class="gwb-small-button" type="button" data-action="rename">Rename</button>
         <button class="gwb-icon-button" type="button" data-action="close" title="Close branch">x</button>
       </header>
       <div class="gwb-output" data-role="output"></div>
@@ -578,12 +573,6 @@
         setStatus(error.message || "Could not open branch.");
       });
     });
-    panel.querySelector("[data-action='rename']").addEventListener("click", () => {
-      renameBranch(branchId).catch((error) => {
-        setStatus(error.message || "Could not rename branch.", { sticky: true, tone: "error" });
-      });
-    });
-
     return panel;
   }
 
@@ -629,17 +618,6 @@
     });
   }
 
-  async function renameBranch(branchId) {
-    setStatus("Trying branch rename...");
-    const result = await sendRuntime("GWB_RENAME_BRANCH", {
-      branchId
-    });
-    setStatus(result.renamed ? "Branch renamed." : "Rename controls not found.", {
-      sticky: !result.renamed,
-      tone: result.renamed ? "" : "error"
-    });
-  }
-
   function upsertBranch(branch) {
     if (!branch || !branch.id) {
       return;
@@ -679,151 +657,64 @@
     throw new Error(buildComposerTimeoutMessage(lastClickedText));
   }
 
-  async function renameBranchConversationIfNeeded() {
-    const suffix = getBranchSuffix();
-    if (!suffix) {
-      state.branchRenameDone = true;
+  async function markCurrentConversationAsTrunk(options = {}) {
+    if (!options.silent) {
+      setStatus("Marking trunk...");
+    }
+    const renamed = await renameCurrentConversationWithSuffix("--TRUNK");
+    if (!options.silent) {
+      setStatus(renamed ? "Trunk marked." : "Rename controls not found.", {
+        sticky: !renamed,
+        tone: renamed ? "" : "error"
+      });
+    }
+    return renamed;
+  }
+
+  async function renameCurrentConversationWithSuffix(suffix) {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await revealConversationHistory();
+      await sleep(attempt === 0 ? 300 : 800);
+
+      const renameAction = await openCurrentConversationActionMenu();
+      if (!renameAction) {
+        continue;
+      }
+
+      activateElement(renameAction);
+      const editor = await waitForElement(() => findRenameEditor(), 5000).catch(() => null);
+      if (!editor) {
+        closeAnyDialog();
+        continue;
+      }
+
+      const currentTitle = getEditorText(editor) || detectConversationTitle() || cleanConversationTitle(document.title) || "Gemini";
+      const desiredTitle = appendTitleSuffix(currentTitle, suffix);
+      if (normalizeText(getEditorText(editor)) === desiredTitle) {
+        closeAnyDialog();
+        return true;
+      }
+
+      focusAndSetText(editor, desiredTitle);
+      await sleep(250);
+
+      const surface = getTopDialogSurface() || document;
+      const confirm = findRenameConfirmButton(surface);
+      if (confirm) {
+        activateElement(confirm);
+      } else {
+        pressEnter(editor);
+      }
+      await sleep(900);
       return true;
     }
 
-    try {
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        if (state.branchRenameCancelled) {
-          return false;
-        }
-        await sleep(attempt === 0 ? 450 : 1800);
-        const renamed = await renameCurrentConversation(suffix);
-        if (renamed) {
-          state.branchRenameDone = true;
-          return true;
-        }
-      }
-      console.warn("[Gemini Web Brancher] Could not find Gemini rename controls.");
-    } catch (error) {
-      console.warn("[Gemini Web Brancher] Could not rename branch conversation", error);
-    }
     return false;
   }
 
-  async function renameBranchNow() {
-    state.branchRenameCancelled = false;
-    state.branchRenameDone = false;
-    state.branchRenameRunning = true;
-    clearTimeout(state.branchRenameTimer);
-    state.branchRenameTimer = null;
-
-    try {
-      await prepareBranchComposer(30000);
-      for (let attempt = 0; attempt < 4; attempt += 1) {
-        const renamed = await renameCurrentConversation(getBranchSuffix());
-        if (renamed) {
-          state.branchRenameDone = true;
-          return true;
-        }
-        await sleep(700);
-      }
-      return false;
-    } finally {
-      state.branchRenameRunning = false;
-    }
-  }
-
-  function scheduleBranchRenameWhenIdle(delayMs = 4000) {
-    if (state.role !== "branch" || state.branchRenameDone || state.branchRenameRunning || state.branchRenameAttempts >= 6) {
-      return;
-    }
-
-    clearTimeout(state.branchRenameTimer);
-    state.branchRenameTimer = setTimeout(async () => {
-      if (state.branchRenameDone || state.branchRenameRunning) {
-        return;
-      }
-      if (state.branchStreaming) {
-        scheduleBranchRenameWhenIdle(5000);
-        return;
-      }
-
-      state.branchRenameAttempts += 1;
-      state.branchRenameRunning = true;
-      state.branchRenameCancelled = false;
-      try {
-        state.branchRenamePromise = renameBranchConversationIfNeeded();
-        const renamed = await state.branchRenamePromise;
-        if (!renamed && !state.branchRenameDone && state.branchRenameAttempts < 6) {
-          scheduleBranchRenameWhenIdle(12000);
-        }
-      } finally {
-        state.branchRenameRunning = false;
-      }
-    }, delayMs);
-  }
-
-  function cancelBranchRenameForPrompt() {
-    if (state.branchRenameRunning || state.branchRenamePromise) {
-      state.branchRenameCancelled = true;
-      closeAnyDialog();
-    }
-    clearTimeout(state.branchRenameTimer);
-    state.branchRenameTimer = null;
-  }
-
-  async function renameCurrentConversation(suffix) {
-    if (state.branchRenameCancelled) {
-      return false;
-    }
-
-    await revealConversationHistory();
-    await sleep(350);
-    if (state.branchRenameCancelled) {
-      return false;
-    }
-
-    const renameAction = await openRenameActionMenu();
-    if (!renameAction || state.branchRenameCancelled) {
-      closeAnyDialog();
-      return false;
-    }
-
-    activateElement(renameAction);
-    const editor = await waitForElement(() => findRenameEditor(), 5000).catch(() => null);
-    if (!editor || state.branchRenameCancelled) {
-      closeAnyDialog();
-      return false;
-    }
-
-    const currentTitle = getEditorText(editor) || detectConversationTitle() || cleanConversationTitle(state.branchMeta.parentTitle) || "Gemini branch";
-    const desiredTitle = `${stripBranchSuffix(currentTitle)}${suffix}`;
-    if (!desiredTitle || normalizeText(getEditorText(editor)) === desiredTitle) {
-      closeAnyDialog();
-      return true;
-    }
-
-    focusAndSetText(editor, desiredTitle);
-    await sleep(250);
-    if (state.branchRenameCancelled) {
-      closeAnyDialog();
-      return false;
-    }
-
-    const surface = getTopDialogSurface() || document;
-    const confirm = findRenameConfirmButton(surface);
-    if (confirm) {
-      activateElement(confirm);
-    } else {
-      pressEnter(editor);
-    }
-    await sleep(900);
-    return true;
-  }
-
-  async function openRenameActionMenu() {
-    const latestAction = await openLatestConversationActionMenu();
-    if (latestAction) {
-      return latestAction;
-    }
-
-    const opener = await waitForRenameMenuOpener(9000);
-    if (opener && !state.branchRenameCancelled) {
+  async function openCurrentConversationActionMenu() {
+    const opener = await waitForRenameMenuOpener(6000);
+    if (opener) {
       activateElement(opener);
       const renameAction = await waitForElement(() => findRenameAction(), 5000).catch(() => null);
       if (renameAction) {
@@ -834,29 +725,6 @@
     }
 
     for (const container of findCurrentConversationContainers()) {
-      if (state.branchRenameCancelled) {
-        return null;
-      }
-      revealElementControls(container);
-      dispatchContextMenu(container);
-      const renameAction = await waitForElement(() => findRenameAction(), 1800).catch(() => null);
-      if (renameAction) {
-        return renameAction;
-      }
-      closeAnyDialog();
-      await sleep(250);
-    }
-
-    return null;
-  }
-
-  async function openLatestConversationActionMenu() {
-    const containers = findLatestConversationContainers();
-    for (const container of containers) {
-      if (state.branchRenameCancelled) {
-        return null;
-      }
-
       revealElementControls(container);
       await sleep(180);
       const menuButton = findConversationMenuButton(container);
@@ -871,47 +739,15 @@
       }
 
       dispatchContextMenu(container);
-      const contextRenameAction = await waitForElement(() => findRenameAction(), 1600).catch(() => null);
-      if (contextRenameAction) {
-        return contextRenameAction;
+      const renameAction = await waitForElement(() => findRenameAction(), 1800).catch(() => null);
+      if (renameAction) {
+        return renameAction;
       }
       closeAnyDialog();
       await sleep(250);
     }
 
     return null;
-  }
-
-  function findLatestConversationContainers() {
-    const anchors = queryAllDeep(document, "aside a[href], nav a[href], [role='navigation'] a[href], a[href*='/app/']")
-      .filter((anchor) => anchor instanceof HTMLAnchorElement)
-      .filter(isVisible)
-      .filter((anchor) => !anchor.closest(`#${ROOT_ID}`))
-      .filter(isConversationAnchor)
-      .map((anchor) => anchor.closest("[role='listitem'], li, mat-list-item, [data-test-id], [data-testid], .conversation, .chat, .history") || anchor)
-      .filter((container) => !isPinnedConversationContainer(container))
-      .filter((container) => isLikelyConversationTitle(getElementVisibleLabel(container)));
-
-    return uniqueElements(anchors)
-      .filter((element) => element instanceof Element)
-      .slice(0, 8);
-  }
-
-  function isConversationAnchor(anchor) {
-    try {
-      const url = new URL(anchor.href, location.href);
-      return (
-        url.hostname === "gemini.google.com" &&
-        /^\/app\/[^/]+\/?$/.test(url.pathname)
-      );
-    } catch {
-      return false;
-    }
-  }
-
-  function isPinnedConversationContainer(container) {
-    const label = getElementVisibleLabel(container).toLowerCase();
-    return /pinned|已固定|取消固定|unpin/.test(label);
   }
 
   async function waitForRenameMenuOpener(timeoutMs) {
@@ -1226,17 +1062,6 @@
     return surfaces[surfaces.length - 1] || null;
   }
 
-  function getBranchSuffix() {
-    if (!state.branchMeta) {
-      return "";
-    }
-    if (state.branchMeta.branchSuffix) {
-      return String(state.branchMeta.branchSuffix);
-    }
-    const number = Number(state.branchMeta.branchNumber);
-    return number ? `_branch${number}` : "";
-  }
-
   function detectConversationTitle() {
     const candidates = findCurrentConversationContainers()
       .map(getElementVisibleLabel)
@@ -1279,9 +1104,10 @@
       .trim();
   }
 
-  function stripBranchSuffix(title) {
+  function appendTitleSuffix(title, suffix) {
     const cleaned = cleanConversationTitle(title);
-    return cleaned.replace(/(?:_branch\d+)+$/i, "").trim() || cleaned;
+    const base = cleaned.replace(/\s*--TRUNK\s*$/i, "").trim();
+    return `${base || "Gemini"}${suffix}`;
   }
 
   function isLikelyConversationTitle(title) {
@@ -1303,7 +1129,6 @@
   }
 
   async function submitPromptToGemini(prompt, turnId) {
-    cancelBranchRenameForPrompt();
     closeAnyDialog();
     await sleep(150);
 
@@ -1386,7 +1211,6 @@
         html: state.branchLastHtml,
         url: location.href
       }).catch(console.error);
-      scheduleBranchRenameWhenIdle(3000);
     }, RESPONSE_IDLE_MS);
   }
 

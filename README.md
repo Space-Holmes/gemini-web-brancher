@@ -13,6 +13,8 @@
 - 在原页面每个 branch 面板里输入 prompt，并转发到对应 worker 窗口。
 - 从 worker 窗口监听最新 Gemini 回复文本，并同步显示到原页面。
 - Branch 会持续等待 Gemini 生成分享链接，并自动完成链接提取。
+- 创建 branch 后会尝试把当前主对话标题标记为 `--TRUNK`，也可以用页面里的 Mark Trunk 按钮手动重试。
+- Branch 面板会按当前主对话分组显示，并最多三列并排排列。
 - 可从 branch 面板或扩展弹窗打开 branch worker 窗口进行人工排查。
 
 ## 重要限制
@@ -78,7 +80,7 @@ npm run package
 
 - 更强的 Gemini DOM selector 适配。
 - 更强的自动复制分享链接 fallback。
-- branch worker 窗口自动命名和一键关闭。
+- 更强的主对话 `--TRUNK` 自动标记。
 - 更准确的流式输出结束检测。
 - 支持导出 branch 树。
 

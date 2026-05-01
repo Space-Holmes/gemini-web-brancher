@@ -733,11 +733,12 @@
         return true;
       }
 
-      focusAndSetText(editor, desiredTitle);
+      await focusAndSetText(editor, desiredTitle);
+      await waitForElement(() => getEditorText(editor) === desiredTitle ? editor : null, 1200).catch(() => null);
       await sleep(250);
 
       const surface = getTopDialogSurface() || document;
-      const confirm = findRenameConfirmButton(surface);
+      const confirm = await waitForElement(() => findRenameConfirmButton(surface), 2500).catch(() => null);
       if (confirm) {
         activateElement(confirm);
       } else {
@@ -1162,7 +1163,7 @@
     state.branchResponseStartedAt = Date.now();
     state.branchLastRealOutputAt = 0;
     state.branchStreaming = true;
-    focusAndSetText(editor, prompt);
+    await focusAndSetText(editor, prompt);
     await sleep(250);
 
     const sendButton = findSendButton(editor);
@@ -1736,28 +1737,53 @@
     return editors[editors.length - 1] || null;
   }
 
-  function focusAndSetText(editor, text) {
+  async function focusAndSetText(editor, text) {
     editor.focus();
     if (editor instanceof HTMLTextAreaElement || editor instanceof HTMLInputElement) {
-      editor.value = text;
-      editor.dispatchEvent(new InputEvent("input", {
-        bubbles: true,
-        inputType: "insertText",
-        data: text
-      }));
-      editor.dispatchEvent(new Event("change", { bubbles: true }));
+      setFormControlValue(editor, "");
+      await sleep(30);
+      setFormControlValue(editor, text);
       return;
     }
 
-    document.getSelection().selectAllChildren(editor);
+    const selection = document.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    selection.removeAllRanges();
+    selection.addRange(range);
     const inserted = document.execCommand && document.execCommand("insertText", false, text);
     if (!inserted) {
       editor.textContent = text;
-      editor.dispatchEvent(new InputEvent("input", {
-        bubbles: true,
-        inputType: "insertText",
-        data: text
-      }));
+    }
+    dispatchTextInputEvents(editor, text);
+  }
+
+  function setFormControlValue(editor, text) {
+    const prototype = editor instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype;
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
+    if (descriptor && descriptor.set) {
+      descriptor.set.call(editor, text);
+    } else {
+      editor.value = text;
+    }
+    dispatchTextInputEvents(editor, text);
+  }
+
+  function dispatchTextInputEvents(element, text) {
+    const eventInit = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      inputType: "insertText",
+      data: text
+    };
+    element.dispatchEvent(new InputEvent("beforeinput", eventInit));
+    element.dispatchEvent(new InputEvent("input", eventInit));
+    element.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+    for (const key of ["Control", "a", "Backspace"]) {
+      element.dispatchEvent(new KeyboardEvent("keyup", { key, bubbles: true, composed: true }));
     }
   }
 

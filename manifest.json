@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Gemini Web Brancher",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Adds branch-style side conversations to Gemini Web by mirroring hidden branch tabs created from share links.",
   "permissions": [
     "clipboardRead",

@@ -3,12 +3,14 @@
 const STORAGE_KEY = "gwb:state:v1";
 const SOURCE = "gwb";
 const BRANCH_READY_TIMEOUT_MS = 60000;
+const BRANCH_WAKE_INTERVAL_MS = 5000;
 
 const DEFAULT_STATE = {
   branches: {}
 };
 
 let stateMutationQueue = Promise.resolve();
+const branchWakeTimes = new Map();
 
 chrome.runtime.onInstalled.addListener(() => {
   withStateMutation((state) => state).catch(console.error);
@@ -274,6 +276,7 @@ async function handlePollBranchOutput(message) {
 
   await Promise.all(branches.map(async (branch) => {
     try {
+      await wakeBranchWorker(branch);
       await chrome.tabs.sendMessage(branch.tabId, {
         source: SOURCE,
         type: "GWB_BRANCH_POLL_OUTPUT",
@@ -288,6 +291,27 @@ async function handlePollBranchOutput(message) {
   return {
     polled: branches.length
   };
+}
+
+async function wakeBranchWorker(branch) {
+  if (!branch || branch.workerMode !== "background-window" || !Number.isInteger(branch.tabId)) {
+    return;
+  }
+
+  const now = Date.now();
+  const lastWakeAt = branchWakeTimes.get(branch.id) || 0;
+  if (now - lastWakeAt < BRANCH_WAKE_INTERVAL_MS) {
+    return;
+  }
+  branchWakeTimes.set(branch.id, now);
+
+  try {
+    await chrome.tabs.update(branch.tabId, {
+      active: true
+    });
+  } catch (error) {
+    console.warn("[Gemini Web Brancher] Could not wake branch worker", error);
+  }
 }
 
 async function handleBranchOutput(message, sender) {

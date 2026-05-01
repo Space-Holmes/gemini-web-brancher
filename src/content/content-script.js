@@ -1335,46 +1335,70 @@
     const baselineOutput = state.branchBaselineOutput || "";
     const submittedPrompt = state.branchSubmittedPrompt || "";
 
-    return candidates
+    const scored = candidates
       .map((element, index) => {
         const text = normalizeText(element.innerText || element.textContent || "");
         const fingerprint = responseFingerprint(element);
         const changedText = Boolean(text && text !== baselineOutput && !baselineTexts.has(fingerprint));
+        const modelLike = looksLikeModelResponseElement(element);
+        const wholeConversation = looksLikeWholeConversationElement(element);
+        const containsPrompt = Boolean(submittedPrompt && textIncludesNormalized(text, submittedPrompt));
+        const containsBaseline = Boolean(baselineOutput && textIncludesNormalized(text, baselineOutput) && text.length > baselineOutput.length + 120);
         let score = 0;
 
         if (changedText) {
-          score += 70;
+          score += 80;
         }
         if (baselineElements && !baselineElements.has(element)) {
-          score += 35;
+          score += 25;
         }
-        if (looksLikeModelResponseElement(element)) {
-          score += 35;
+        if (modelLike) {
+          score += 55;
         }
-        if (looksLikeWholeConversationElement(element)) {
+        if (wholeConversation) {
+          score -= 180;
+        }
+        if (containsPrompt) {
+          score -= modelLike ? 60 : 150;
+        }
+        if (containsBaseline) {
           score -= 100;
         }
-        if (submittedPrompt && textIncludesNormalized(text, submittedPrompt)) {
-          score -= looksLikeModelResponseElement(element) ? 35 : 120;
-        }
-        if (baselineOutput && textIncludesNormalized(text, baselineOutput) && text.length > baselineOutput.length + 120) {
-          score -= 80;
+        if (text.length > 6000) {
+          score -= 60;
         }
 
         return {
           element,
           score,
           index,
-          changedText
+          changedText,
+          modelLike,
+          wholeConversation,
+          containsPrompt,
+          containsBaseline
         };
       })
-      .filter((candidate) => candidate.changedText && candidate.score > 40)
       .sort((a, b) => {
-        if (a.index !== b.index) {
-          return a.index - b.index;
+        if (a.score !== b.score) {
+          return a.score - b.score;
         }
-        return a.score - b.score;
+        return a.index - b.index;
       })
+      .filter((candidate) => candidate.changedText);
+
+    const accepted = scored.filter((candidate) => candidate.score > 20);
+    if (accepted.length) {
+      return accepted.map((candidate) => candidate.element);
+    }
+
+    return scored
+      .filter((candidate) => (
+        candidate.modelLike &&
+        !candidate.wholeConversation &&
+        !candidate.containsPrompt &&
+        !candidate.containsBaseline
+      ))
       .map((candidate) => candidate.element);
   }
 
@@ -1423,6 +1447,12 @@
   }
 
   function looksLikeWholeConversationElement(element) {
+    if (!element || !(element instanceof Element)) {
+      return false;
+    }
+    if (element.matches("model-response, message-content, .markdown")) {
+      return countNestedResponseCandidates(element) > 1;
+    }
     const descriptor = [
       element.localName,
       element.className,
@@ -1434,11 +1464,26 @@
       .filter(Boolean)
       .join(" ")
       .toLowerCase();
-    if (/conversation|chat-history|conversation-container|main/.test(descriptor)) {
+    if (/conversation|chat-history|conversation-container|main/.test(descriptor) && countNestedResponseCandidates(element) > 1) {
       return true;
     }
     const text = normalizeText(element.innerText || element.textContent || "");
-    return /\b(you|gemini)\b/i.test(text) && text.length > 1800;
+    return /(\b(you|gemini)\b|你说|我说|用户|assistant|model)/i.test(text) && text.length > 1800;
+  }
+
+  function countNestedResponseCandidates(element) {
+    return queryAllDeep(element, [
+      "model-response",
+      "[data-test-id*='model-response' i]",
+      "[data-testid*='model-response' i]",
+      "[data-test-id*='response' i]",
+      "[data-testid*='response' i]",
+      "[class*='model-response' i]",
+      "message-content",
+      ".markdown"
+    ].join(","))
+      .filter((candidate) => candidate !== element)
+      .length;
   }
 
   function textIncludesNormalized(text, needle) {
@@ -1550,7 +1595,7 @@
       for (const attribute of Array.from(element.attributes)) {
         const name = attribute.name.toLowerCase();
         const value = attribute.value.trim().toLowerCase();
-        if (name.startsWith("on") || name === "srcdoc" || value.startsWith("javascript:")) {
+        if (name.startsWith("on") || name === "srcdoc" || name === "style" || value.startsWith("javascript:")) {
           element.removeAttribute(attribute.name);
         }
       }

@@ -178,6 +178,16 @@
   background: #f8fafd;
 }
 
+.gwb-turn-assistant .gwb-turn-content:not(.gwb-muted),
+.gwb-turn-assistant .gwb-turn-content:not(.gwb-muted) * {
+  color: #202124 !important;
+  opacity: 1 !important;
+}
+
+.gwb-turn-assistant .gwb-turn-content:not(.gwb-muted) a {
+  color: #1a73e8 !important;
+}
+
 .gwb-text {
   white-space: pre-wrap;
 }

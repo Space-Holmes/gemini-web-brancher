@@ -1,6 +1,6 @@
 {
   "name": "gemini-web-brancher",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Chrome extension prototype that adds branch-style conversations to Gemini Web.",
   "private": true,
   "type": "module",

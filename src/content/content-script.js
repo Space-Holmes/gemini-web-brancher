@@ -32,6 +32,9 @@
     branchLastOutput: "",
     branchLastHtml: "",
     branchBaselineOutput: "",
+    branchBaselineResponseTexts: new Set(),
+    branchBaselineResponseElements: new WeakSet(),
+    branchSubmittedPrompt: "",
     branchCurrentTurnId: "",
     branchResponseStartedAt: 0,
     branchLastRealOutputAt: 0,
@@ -1115,13 +1118,17 @@
     return normalizeText(title)
       .replace(/[\u200e\u200f\u202a-\u202e]/g, "")
       .replace(/^gemini\s*[-–—]\s*/i, "")
+      .replace(/\s*(?:--+|[-–—]+)\s*gemini\s*$/i, "")
       .replace(/\s+https?:\/\/\S+$/i, "")
       .trim();
   }
 
   function appendTitleSuffix(title, suffix) {
     const cleaned = cleanConversationTitle(title);
-    const base = cleaned.replace(/\s*--TRUNK\s*$/i, "").trim();
+    const base = cleaned
+      .replace(/\s*(?:--\s*gemini\s*)?--TRUNK\s*$/i, "")
+      .replace(/\s*--\s*gemini\s*$/i, "")
+      .trim();
     return `${base || "Gemini"}${suffix}`;
   }
 
@@ -1158,7 +1165,11 @@
 
     const editor = await waitForComposer(45000);
     const before = findLatestModelResponse();
+    const baseline = captureResponseBaseline();
     state.branchBaselineOutput = before ? normalizeText(before.innerText || before.textContent || "") : "";
+    state.branchBaselineResponseTexts = baseline.texts;
+    state.branchBaselineResponseElements = baseline.elements;
+    state.branchSubmittedPrompt = normalizeText(prompt);
     state.branchCurrentTurnId = turnId || "";
     state.branchResponseStartedAt = Date.now();
     state.branchLastRealOutputAt = 0;
@@ -1216,7 +1227,9 @@
       return;
     }
 
-    const latest = findLatestModelResponse();
+    const latest = findLatestModelResponse({
+      currentTurnOnly: true
+    });
     const output = latest ? normalizeText(latest.innerText || latest.textContent || "") : "";
     if (!output || output === state.branchBaselineOutput || output === state.branchLastOutput) {
       return;
@@ -1278,7 +1291,13 @@
     }).catch(console.error);
   }
 
-  function findLatestModelResponse() {
+  function findLatestModelResponse(options = {}) {
+    const candidates = getModelResponseCandidates();
+    const scoped = options.currentTurnOnly ? filterCurrentTurnResponseCandidates(candidates) : candidates;
+    return scoped[scoped.length - 1] || null;
+  }
+
+  function getModelResponseCandidates() {
     const selectors = [
       "model-response",
       "[data-test-id*='model-response' i]",
@@ -1293,9 +1312,139 @@
     const candidates = uniqueElements(selectors.flatMap((selector) => queryAllDeep(document, selector)))
       .filter((element) => element.id !== ROOT_ID && !element.closest(`#${ROOT_ID}`))
       .filter((element) => state.role === "branch" || isVisible(element))
-      .filter((element) => normalizeText(element.innerText || element.textContent || "").length > 24);
+      .filter((element) => isLikelyResponseCandidate(element))
+      .filter((element) => normalizeText(element.innerText || element.textContent || "").length > 1);
 
-    return candidates[candidates.length - 1] || null;
+    const leaves = candidates.filter((element) => {
+      const textLength = normalizeText(element.innerText || element.textContent || "").length;
+      return !candidates.some((other) => {
+        if (other === element || !element.contains(other)) {
+          return false;
+        }
+        const otherLength = normalizeText(other.innerText || other.textContent || "").length;
+        return otherLength >= Math.min(textLength * 0.7, 80);
+      });
+    });
+
+    return leaves.length ? leaves : candidates;
+  }
+
+  function filterCurrentTurnResponseCandidates(candidates) {
+    const baselineTexts = state.branchBaselineResponseTexts || new Set();
+    const baselineElements = state.branchBaselineResponseElements;
+    const baselineOutput = state.branchBaselineOutput || "";
+    const submittedPrompt = state.branchSubmittedPrompt || "";
+
+    return candidates
+      .map((element, index) => {
+        const text = normalizeText(element.innerText || element.textContent || "");
+        const fingerprint = responseFingerprint(element);
+        const changedText = Boolean(text && text !== baselineOutput && !baselineTexts.has(fingerprint));
+        let score = 0;
+
+        if (changedText) {
+          score += 70;
+        }
+        if (baselineElements && !baselineElements.has(element)) {
+          score += 35;
+        }
+        if (looksLikeModelResponseElement(element)) {
+          score += 35;
+        }
+        if (looksLikeWholeConversationElement(element)) {
+          score -= 100;
+        }
+        if (submittedPrompt && textIncludesNormalized(text, submittedPrompt)) {
+          score -= looksLikeModelResponseElement(element) ? 35 : 120;
+        }
+        if (baselineOutput && textIncludesNormalized(text, baselineOutput) && text.length > baselineOutput.length + 120) {
+          score -= 80;
+        }
+
+        return {
+          element,
+          score,
+          index,
+          changedText
+        };
+      })
+      .filter((candidate) => candidate.changedText && candidate.score > 40)
+      .sort((a, b) => {
+        if (a.index !== b.index) {
+          return a.index - b.index;
+        }
+        return a.score - b.score;
+      })
+      .map((candidate) => candidate.element);
+  }
+
+  function captureResponseBaseline() {
+    const candidates = getModelResponseCandidates();
+    return {
+      texts: new Set(candidates.map(responseFingerprint).filter(Boolean)),
+      elements: new WeakSet(candidates)
+    };
+  }
+
+  function responseFingerprint(element) {
+    return normalizeText(element.innerText || element.textContent || "");
+  }
+
+  function isLikelyResponseCandidate(element) {
+    if (!element || !(element instanceof Element)) {
+      return false;
+    }
+    if (element.closest("button, [role='button'], input, textarea, select, option")) {
+      return false;
+    }
+    if (element.closest("[role='dialog'], mat-dialog-container, .cdk-overlay-pane")) {
+      return false;
+    }
+    if (element.closest("nav, aside, header") && !looksLikeModelResponseElement(element)) {
+      return false;
+    }
+    return true;
+  }
+
+  function looksLikeModelResponseElement(element) {
+    const descriptor = [
+      element.localName,
+      element.className,
+      element.id,
+      element.getAttribute("data-test-id"),
+      element.getAttribute("data-testid"),
+      element.getAttribute("aria-label"),
+      element.getAttribute("role")
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return /model-response|response|assistant|message-content|markdown/.test(descriptor);
+  }
+
+  function looksLikeWholeConversationElement(element) {
+    const descriptor = [
+      element.localName,
+      element.className,
+      element.id,
+      element.getAttribute("data-test-id"),
+      element.getAttribute("data-testid"),
+      element.getAttribute("role")
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    if (/conversation|chat-history|conversation-container|main/.test(descriptor)) {
+      return true;
+    }
+    const text = normalizeText(element.innerText || element.textContent || "");
+    return /\b(you|gemini)\b/i.test(text) && text.length > 1800;
+  }
+
+  function textIncludesNormalized(text, needle) {
+    const normalizedText = normalizeText(text).toLowerCase();
+    const normalizedNeedle = normalizeText(needle).toLowerCase();
+    return Boolean(normalizedNeedle && normalizedText.includes(normalizedNeedle));
   }
 
   function isTransientGeminiStatus(output, element) {

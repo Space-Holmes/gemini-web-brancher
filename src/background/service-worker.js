@@ -561,7 +561,9 @@ function branchesForParentConversation(state, parentConversationKey, options = {
 }
 
 function nextBranchNumber(state, parentConversationKey) {
-  const existing = branchesForParentConversation(state, parentConversationKey)
+  const existing = branchesForParentConversation(state, parentConversationKey, {
+    includeClosed: true
+  })
     .map((branch) => Number(branch.branchNumber) || 0);
   return existing.length ? Math.max(...existing) + 1 : 1;
 }

@@ -33,11 +33,10 @@
     branchLastHtml: "",
     branchBaselineOutput: "",
     branchBaselineResponseElement: null,
+    branchBaselineResponseCount: 0,
     branchBaselineResponseTexts: new Set(),
     branchBaselineResponseElements: new WeakSet(),
-    branchBaselinePromptElements: new WeakSet(),
     branchSubmittedPrompt: "",
-    branchSubmittedPromptElement: null,
     branchCurrentTurnId: "",
     branchResponseStartedAt: 0,
     branchLastRealOutputAt: 0,
@@ -1169,14 +1168,12 @@
     const editor = await waitForComposer(45000);
     const before = findLatestModelResponse();
     const baseline = captureResponseBaseline();
-    const promptBaseline = capturePromptBaseline(prompt);
     state.branchBaselineOutput = before ? normalizeText(before.innerText || before.textContent || "") : "";
     state.branchBaselineResponseElement = before || null;
+    state.branchBaselineResponseCount = baseline.count;
     state.branchBaselineResponseTexts = baseline.texts;
     state.branchBaselineResponseElements = baseline.elements;
-    state.branchBaselinePromptElements = promptBaseline.elements;
     state.branchSubmittedPrompt = normalizeText(prompt);
-    state.branchSubmittedPromptElement = null;
     state.branchCurrentTurnId = turnId || "";
     state.branchResponseStartedAt = Date.now();
     state.branchLastRealOutputAt = 0;
@@ -1194,7 +1191,6 @@
     state.branchLastHtml = "";
     startBranchOutputPolling();
     await sleep(1000);
-    state.branchSubmittedPromptElement = findSubmittedPromptAnchor();
     scanBranchOutput();
   }
 
@@ -1235,15 +1231,7 @@
       return;
     }
 
-    const promptAnchor = findSubmittedPromptAnchor();
-    if (!promptAnchor && !canFallbackWithoutPromptAnchor()) {
-      return;
-    }
-
-    const latest = findLatestModelResponse({
-      currentTurnOnly: true,
-      afterElement: promptAnchor || state.branchBaselineResponseElement
-    });
+    const latest = findCurrentTurnModelResponse();
     const output = latest ? normalizeText(latest.innerText || latest.textContent || "") : "";
     if (!output || isBaselineEcho(output) || output === state.branchLastOutput) {
       return;
@@ -1264,6 +1252,25 @@
     }).catch(console.error);
 
     scheduleBranchDoneCheck();
+  }
+
+  function findCurrentTurnModelResponse() {
+    const latestNewCandidate = findLatestModelResponse({
+      currentTurnOnly: true,
+      minCandidateIndex: state.branchBaselineResponseCount
+    });
+    if (latestNewCandidate) {
+      return latestNewCandidate;
+    }
+
+    if (!canFallbackAfterBaseline()) {
+      return null;
+    }
+
+    return findLatestModelResponse({
+      currentTurnOnly: true,
+      afterElement: state.branchBaselineResponseElement
+    });
   }
 
   function scheduleBranchDoneCheck() {
@@ -1307,6 +1314,9 @@
 
   function findLatestModelResponse(options = {}) {
     let candidates = getModelResponseCandidates();
+    if (Number.isInteger(options.minCandidateIndex) && options.minCandidateIndex > 0) {
+      candidates = candidates.filter((_element, index) => index >= options.minCandidateIndex);
+    }
     if (options.afterElement) {
       candidates = candidates.filter((element) => isAfterElement(element, options.afterElement));
     }
@@ -1419,104 +1429,7 @@
       .map((candidate) => candidate.element);
   }
 
-  function capturePromptBaseline(prompt) {
-    return {
-      elements: new WeakSet(getPromptCandidateElements(prompt))
-    };
-  }
-
-  function findSubmittedPromptAnchor() {
-    if (
-      state.branchSubmittedPromptElement &&
-      state.branchSubmittedPromptElement.isConnected &&
-      elementContainsPrompt(state.branchSubmittedPromptElement, state.branchSubmittedPrompt)
-    ) {
-      return state.branchSubmittedPromptElement;
-    }
-
-    const prompt = state.branchSubmittedPrompt;
-    if (!prompt) {
-      return null;
-    }
-
-    const candidates = getPromptCandidateElements(prompt)
-      .filter((element) => !(state.branchBaselinePromptElements && state.branchBaselinePromptElements.has(element)))
-      .filter((element) => {
-        if (!state.branchBaselineResponseElement || !state.branchBaselineResponseElement.isConnected) {
-          return true;
-        }
-        return isAfterElement(element, state.branchBaselineResponseElement);
-      })
-      .sort(compareDocumentOrder);
-
-    const anchor = candidates[candidates.length - 1] || null;
-    if (anchor) {
-      state.branchSubmittedPromptElement = anchor;
-    }
-    return anchor;
-  }
-
-  function getPromptCandidateElements(prompt) {
-    const normalizedPrompt = normalizeText(prompt);
-    if (!normalizedPrompt) {
-      return [];
-    }
-
-    const selectors = [
-      "[data-test-id*='user' i]",
-      "[data-testid*='user' i]",
-      "[class*='user' i]",
-      "[class*='query' i]",
-      "[class*='prompt' i]",
-      "[class*='message' i]",
-      "[role='heading']",
-      "user-query",
-      "message-content",
-      ".markdown",
-      "div",
-      "span",
-      "p"
-    ];
-
-    return uniqueElements(selectors.flatMap((selector) => queryAllDeep(document, selector)))
-      .filter((element) => element.id !== ROOT_ID && !element.closest(`#${ROOT_ID}`))
-      .filter((element) => isLikelyPromptCandidate(element))
-      .filter((element) => elementContainsPrompt(element, normalizedPrompt))
-      .filter((element) => !hasSmallerPromptMatch(element, normalizedPrompt));
-  }
-
-  function isLikelyPromptCandidate(element) {
-    if (!element || !(element instanceof Element)) {
-      return false;
-    }
-    if (element.matches("script, style, noscript, textarea, input, button, [role='button']")) {
-      return false;
-    }
-    if (element.closest("textarea, input, button, [role='button'], nav, aside, header")) {
-      return false;
-    }
-    if (element.closest("[role='dialog'], mat-dialog-container, .cdk-overlay-pane")) {
-      return false;
-    }
-    return state.role === "branch" || isVisible(element);
-  }
-
-  function elementContainsPrompt(element, prompt) {
-    const text = normalizeText(element.innerText || element.textContent || "");
-    const normalizedPrompt = normalizeText(prompt);
-    if (!text || !normalizedPrompt) {
-      return false;
-    }
-    return text === normalizedPrompt || textIncludesNormalized(text, normalizedPrompt);
-  }
-
-  function hasSmallerPromptMatch(element, prompt) {
-    return queryAllDeep(element, "*")
-      .filter((child) => child !== element)
-      .some((child) => isLikelyPromptCandidate(child) && elementContainsPrompt(child, prompt));
-  }
-
-  function canFallbackWithoutPromptAnchor() {
+  function canFallbackAfterBaseline() {
     return Boolean(
       state.branchBaselineResponseElement &&
       state.branchBaselineResponseElement.isConnected &&
@@ -1532,16 +1445,6 @@
       return false;
     }
     return Boolean(anchor.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING);
-  }
-
-  function compareDocumentOrder(a, b) {
-    if (a === b) {
-      return 0;
-    }
-    if (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) {
-      return -1;
-    }
-    return 1;
   }
 
   function isBaselineEcho(output) {
@@ -1560,6 +1463,7 @@
   function captureResponseBaseline() {
     const candidates = getModelResponseCandidates();
     return {
+      count: candidates.length,
       texts: new Set(candidates.map(responseFingerprint).filter(Boolean)),
       elements: new WeakSet(candidates)
     };

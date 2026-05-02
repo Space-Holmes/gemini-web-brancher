@@ -1122,11 +1122,17 @@
 
   function appendTitleSuffix(title, suffix) {
     const cleaned = cleanConversationTitle(title);
-    const base = cleaned
+    const base = collapseRepeatedTitleBase(cleaned
       .replace(/\s*(?:--\s*gemini\s*)?--TRUNK\s*$/i, "")
       .replace(/\s*--\s*gemini\s*$/i, "")
-      .trim();
+      .trim());
     return `${base || "Gemini"}${suffix}`;
+  }
+
+  function collapseRepeatedTitleBase(title) {
+    const cleaned = normalizeText(title);
+    const duplicated = cleaned.match(/^(.{2,120})\s+\1$/);
+    return duplicated ? duplicated[1].trim() : cleaned;
   }
 
   function isCurrentConversationMarkedTrunk() {
@@ -1135,7 +1141,7 @@
       ...findCurrentConversationContainers().map(getElementVisibleLabel)
     ].map(cleanConversationTitle);
 
-    return titles.some((title) => /\s*--TRUNK\s*$/i.test(title));
+    return titles.some((title) => /\s*--TRUNK\s*$/i.test(title) && appendTitleSuffix(title, "--TRUNK") === title);
   }
 
   function isLikelyConversationTitle(title) {
@@ -1297,9 +1303,24 @@
     const candidates = uniqueElements(selectors.flatMap((selector) => queryAllDeep(document, selector)))
       .filter((element) => element.id !== ROOT_ID && !element.closest(`#${ROOT_ID}`))
       .filter((element) => state.role === "branch" || isVisible(element))
-      .filter((element) => normalizeText(element.innerText || element.textContent || "").length > 24);
+      .filter((element) => normalizeText(element.innerText || element.textContent || "").length > 24)
+      .sort(compareDocumentOrder);
 
     return candidates[candidates.length - 1] || null;
+  }
+
+  function compareDocumentOrder(a, b) {
+    if (a === b) {
+      return 0;
+    }
+    const position = a.compareDocumentPosition(b);
+    if (position & Node.DOCUMENT_POSITION_FOLLOWING) {
+      return -1;
+    }
+    if (position & Node.DOCUMENT_POSITION_PRECEDING) {
+      return 1;
+    }
+    return 0;
   }
 
   function isTransientGeminiStatus(output, element) {
@@ -1755,8 +1776,18 @@
     range.selectNodeContents(editor);
     selection.removeAllRanges();
     selection.addRange(range);
+    const deleted = document.execCommand && document.execCommand("delete", false);
+    if (!deleted || getEditorText(editor)) {
+      editor.textContent = "";
+      dispatchTextInputEvents(editor, "");
+    }
+    await sleep(30);
+    range.selectNodeContents(editor);
+    range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
     const inserted = document.execCommand && document.execCommand("insertText", false, text);
-    if (!inserted) {
+    if (!inserted || getEditorText(editor) !== normalizeText(text)) {
       editor.textContent = text;
     }
     dispatchTextInputEvents(editor, text);

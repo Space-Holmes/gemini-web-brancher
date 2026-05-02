@@ -689,7 +689,10 @@ async function handleBranchOutput(message, sender) {
     if (!branch || !branch.activeTurnId || (branch.status !== "sending" && branch.status !== "streaming")) {
       return null;
     }
-    if (!shouldAcceptBranchOutput(branch, output, { allowSame: false })) {
+    if (!shouldAcceptBranchOutput(branch, output, {
+      allowSame: false,
+      trustedCapture: isTrustedContentCapture(message.captureMode)
+    })) {
       return null;
     }
     const now = Date.now();
@@ -734,7 +737,10 @@ async function handleBranchDone(message, sender) {
       return null;
     }
     const turn = getActiveBranchTurn(branch);
-    const canUseIncoming = incomingOutput && shouldAcceptBranchOutput(branch, incomingOutput, { allowSame: true });
+    const canUseIncoming = incomingOutput && shouldAcceptBranchOutput(branch, incomingOutput, {
+      allowSame: true,
+      trustedCapture: isTrustedContentCapture(message.captureMode)
+    });
     if (canUseIncoming) {
       const now = Date.now();
       branch.lastOutput = incomingOutput;
@@ -978,7 +984,7 @@ function shouldAcceptBranchOutput(branch, output, options = {}) {
   }
 
   const prompt = normalizeOutputText(turn.prompt || branch.lastPrompt || "");
-  if (isLikelyWholeConversationOutput(normalized, {
+  if (!options.trustedCapture && isLikelyWholeConversationOutput(normalized, {
     baselineOutput,
     prompt
   })) {
@@ -986,6 +992,14 @@ function shouldAcceptBranchOutput(branch, output, options = {}) {
   }
 
   return true;
+}
+
+function isTrustedContentCapture(captureMode) {
+  return [
+    "prompt-anchor",
+    "new-candidate",
+    "after-baseline"
+  ].includes(String(captureMode || ""));
 }
 
 function isBaselineEchoText(output, baseline) {

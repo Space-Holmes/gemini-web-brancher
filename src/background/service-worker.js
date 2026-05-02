@@ -4,6 +4,7 @@ const STORAGE_KEY = "gwb:state:v1";
 const SOURCE = "gwb";
 const BRANCH_READY_TIMEOUT_MS = 60000;
 const BRANCH_WAKE_INTERVAL_MS = 5000;
+const RESPONSE_IDLE_MS = 15000;
 
 const DEFAULT_STATE = {
   branches: {}
@@ -204,6 +205,13 @@ async function handleSendPrompt(message) {
     branch = state.branches[message.branchId] || branch;
   }
 
+  const baselineSnapshot = await captureBranchSnapshot(branch.tabId).catch((error) => {
+    console.warn("[Gemini Web Brancher] Could not capture branch baseline", error);
+    return null;
+  });
+  const baselineOutput = baselineSnapshot && baselineSnapshot.output ? String(baselineSnapshot.output) : "";
+  const baselineFingerprints = snapshotCandidateFingerprints(baselineSnapshot);
+  const baselineCandidateCount = Number(baselineSnapshot && baselineSnapshot.candidateCount) || baselineFingerprints.length;
   const turnId = createId();
   branch = await withStateMutation((state) => {
     const branch = state.branches[message.branchId];
@@ -219,10 +227,19 @@ async function handleSendPrompt(message) {
       prompt,
       output: "",
       outputHtml: "",
+      baselineOutput,
+      baselineFingerprints,
+      baselineCandidateCount,
       createdAt: Date.now(),
       updatedAt: Date.now()
     });
     branch.activeTurnId = turnId;
+    branch.activeTurnBaselineOutput = baselineOutput;
+    branch.activeTurnBaselineFingerprints = baselineFingerprints;
+    branch.activeTurnBaselineCandidateCount = baselineCandidateCount;
+    branch.snapshotBaselineCaptured = Boolean(baselineSnapshot);
+    branch.activeTurnStartedAt = Date.now();
+    branch.lastOutputAt = 0;
     branch.status = "sending";
     branch.lastPrompt = prompt;
     branch.error = "";
@@ -235,6 +252,7 @@ async function handleSendPrompt(message) {
     branch
   });
 
+  await wakeBranchWorker(branch, { force: true });
   await chrome.tabs.sendMessage(branch.tabId, {
     source: SOURCE,
     type: "GWB_BRANCH_SUBMIT_PROMPT",
@@ -277,14 +295,22 @@ async function handlePollBranchOutput(message) {
   await Promise.all(branches.map(async (branch) => {
     try {
       await wakeBranchWorker(branch);
-      await chrome.tabs.sendMessage(branch.tabId, {
+      void chrome.tabs.sendMessage(branch.tabId, {
         source: SOURCE,
         type: "GWB_BRANCH_POLL_OUTPUT",
         branchId: branch.id,
         branch
+      }).catch((error) => {
+        console.warn("[Gemini Web Brancher] Could not poll branch worker", error);
       });
     } catch (error) {
       console.warn("[Gemini Web Brancher] Could not poll branch worker", error);
+    }
+    try {
+      const snapshot = await captureBranchSnapshot(branch.tabId, branchSnapshotContext(branch));
+      await handleBranchSnapshot(branch.id, snapshot);
+    } catch (error) {
+      console.warn("[Gemini Web Brancher] Could not capture branch worker output", error);
     }
   }));
 
@@ -293,14 +319,14 @@ async function handlePollBranchOutput(message) {
   };
 }
 
-async function wakeBranchWorker(branch) {
+async function wakeBranchWorker(branch, options = {}) {
   if (!branch || branch.workerMode !== "background-window" || !Number.isInteger(branch.tabId)) {
     return;
   }
 
   const now = Date.now();
   const lastWakeAt = branchWakeTimes.get(branch.id) || 0;
-  if (now - lastWakeAt < BRANCH_WAKE_INTERVAL_MS) {
+  if (!options.force && now - lastWakeAt < BRANCH_WAKE_INTERVAL_MS) {
     return;
   }
   branchWakeTimes.set(branch.id, now);
@@ -314,22 +340,371 @@ async function wakeBranchWorker(branch) {
   }
 }
 
+async function captureBranchSnapshot(tabId, context = {}) {
+  if (!Number.isInteger(tabId) || !chrome.scripting || !chrome.scripting.executeScript) {
+    return null;
+  }
+
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    args: [context || {}],
+    func: (snapshotContext) => {
+      const normalizeText = (value) => String(value || "").replace(/\s+/g, " ").trim();
+      const fingerprintFor = (value) => {
+        const text = normalizeText(value);
+        let hash = 0;
+        for (let index = 0; index < text.length; index += 1) {
+          hash = ((hash * 31) + text.charCodeAt(index)) >>> 0;
+        }
+        return `${text.length}:${hash.toString(36)}`;
+      };
+      const uniqueElements = (elements) => Array.from(new Set(elements.filter(Boolean)));
+      const queryAllDeep = (root, selector) => {
+        const results = [];
+        const visit = (node) => {
+          if (!node || !node.querySelectorAll) {
+            return;
+          }
+          results.push(...node.querySelectorAll(selector));
+          for (const element of node.querySelectorAll("*")) {
+            if (element.shadowRoot) {
+              visit(element.shadowRoot);
+            }
+          }
+        };
+        visit(root);
+        return uniqueElements(results);
+      };
+      const labelFor = (element) => [
+        element.getAttribute("aria-label"),
+        element.getAttribute("title"),
+        element.getAttribute("data-tooltip"),
+        element.innerText,
+        element.textContent
+      ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+      const descriptorFor = (element) => [
+        element.localName,
+        element.className,
+        element.id,
+        element.getAttribute("data-test-id"),
+        element.getAttribute("data-testid"),
+        element.getAttribute("aria-label"),
+        element.getAttribute("role")
+      ].filter(Boolean).join(" ").toLowerCase();
+      const textIncludesNormalized = (text, needle) => {
+        const normalizedText = normalizeText(text).toLowerCase();
+        const normalizedNeedle = normalizeText(needle).toLowerCase();
+        return Boolean(normalizedNeedle && normalizedText.includes(normalizedNeedle));
+      };
+      const isBaselineEcho = (text, baseline) => {
+        if (!baseline) {
+          return false;
+        }
+        if (text === baseline) {
+          return true;
+        }
+        const shorter = text.length < baseline.length ? text : baseline;
+        const longer = text.length < baseline.length ? baseline : text;
+        return shorter.length > 80 && longer.includes(shorter) && shorter.length / longer.length > 0.65;
+      };
+      const isTransient = (text) => {
+        const normalized = normalizeText(text)
+          .toLowerCase()
+          .replace(/[’`]/g, "'")
+          .replace(/\s+/g, " ");
+        if (!normalized || normalized.length > 180 || normalized.includes("\n")) {
+          return false;
+        }
+        return [
+          /understanding (the )?(user'?s|your) input/,
+          /understanding input/,
+          /thinking/,
+          /generating/,
+          /analy[sz]ing/,
+          /working on it/,
+          /just a sec/,
+          /loading/,
+          /正在(理解|思考|生成|分析|处理)/,
+          /理解.*输入/,
+          /思考中/,
+          /生成中/,
+          /分析中/
+        ].some((pattern) => pattern.test(normalized));
+      };
+      const looksLikeModelResponseElement = (element) => /model-response|response|assistant|message-content|markdown/.test(descriptorFor(element));
+      const responseSelector = [
+        "model-response",
+        "[data-test-id*='model-response' i]",
+        "[data-testid*='model-response' i]",
+        "[data-test-id*='response' i]",
+        "[data-testid*='response' i]",
+        "[class*='model-response' i]",
+        "message-content",
+        ".markdown"
+      ].join(",");
+      const countNestedResponseCandidates = (element) => queryAllDeep(element, responseSelector)
+        .filter((candidate) => candidate !== element)
+        .length;
+      const looksLikeWholeConversationElement = (element, text) => {
+        if (!element || !(element instanceof Element)) {
+          return false;
+        }
+        if (element.matches("model-response, message-content, .markdown")) {
+          return countNestedResponseCandidates(element) > 1;
+        }
+        const descriptor = descriptorFor(element);
+        if (/conversation|chat-history|conversation-container|main/.test(descriptor) && countNestedResponseCandidates(element) > 1) {
+          return true;
+        }
+        return /(\b(you|gemini)\b|你说|我说|用户|assistant|model)/i.test(text) && text.length > 1800;
+      };
+      const isLikelyResponseCandidate = (element) => {
+        if (!element || !(element instanceof Element)) {
+          return false;
+        }
+        if (element.closest("button, [role='button'], input, textarea, select, option")) {
+          return false;
+        }
+        if (element.closest("[role='dialog'], mat-dialog-container, .cdk-overlay-pane")) {
+          return false;
+        }
+        if (element.closest("nav, aside, header") && !looksLikeModelResponseElement(element)) {
+          return false;
+        }
+        return true;
+      };
+
+      const rawCandidates = uniqueElements(queryAllDeep(document, responseSelector))
+        .filter(isLikelyResponseCandidate)
+        .filter((element) => normalizeText(element.innerText || element.textContent || "").length > 1);
+      const leafCandidates = rawCandidates.filter((element) => {
+        const textLength = normalizeText(element.innerText || element.textContent || "").length;
+        return !rawCandidates.some((other) => {
+          if (other === element || !element.contains(other)) {
+            return false;
+          }
+          const otherLength = normalizeText(other.innerText || other.textContent || "").length;
+          return otherLength >= Math.min(textLength * 0.7, 80);
+        });
+      });
+      const elements = leafCandidates.length ? leafCandidates : rawCandidates;
+      const baselineOutput = normalizeText(snapshotContext && snapshotContext.baselineOutput);
+      const currentOutput = normalizeText(snapshotContext && snapshotContext.currentOutput);
+      const submittedPrompt = normalizeText(snapshotContext && snapshotContext.prompt);
+      const baselineCandidateCount = Number(snapshotContext && snapshotContext.baselineCandidateCount) || 0;
+      const baselineFingerprints = new Set((Array.isArray(snapshotContext && snapshotContext.baselineFingerprints)
+        ? snapshotContext.baselineFingerprints
+        : []).map(normalizeText).filter(Boolean));
+      const candidates = elements.map((element, index) => {
+        const text = normalizeText(element.innerText || element.textContent || "");
+        const modelLike = looksLikeModelResponseElement(element);
+        const wholeConversation = looksLikeWholeConversationElement(element, text);
+        const promptEcho = Boolean(submittedPrompt && (
+          text === submittedPrompt ||
+          (textIncludesNormalized(text, submittedPrompt) && text.length <= submittedPrompt.length + 30)
+        ));
+        const containsPrompt = Boolean(submittedPrompt && textIncludesNormalized(text, submittedPrompt));
+        const containsBaseline = Boolean(baselineOutput && textIncludesNormalized(text, baselineOutput) && text.length > baselineOutput.length + 80);
+        const changed = Boolean(
+          text &&
+          text !== baselineOutput &&
+          text !== currentOutput &&
+          !baselineFingerprints.has(text) &&
+          !baselineFingerprints.has(fingerprintFor(text)) &&
+          !isBaselineEcho(text, baselineOutput)
+        );
+        let score = 0;
+        if (changed) {
+          score += 80;
+        }
+        if (baselineCandidateCount && index >= baselineCandidateCount) {
+          score += 90;
+        }
+        if (modelLike) {
+          score += 40;
+        }
+        if (wholeConversation) {
+          score -= 220;
+        }
+        if (containsPrompt) {
+          score -= modelLike ? 50 : 140;
+        }
+        if (promptEcho) {
+          score -= 240;
+        }
+        if (containsBaseline) {
+          score -= 140;
+        }
+        if (text.length > 10000) {
+          score -= 80;
+        }
+        score += Math.min(index, 100) / 100;
+        return {
+          index,
+          text,
+          html: String(element.innerHTML || ""),
+          fingerprint: fingerprintFor(text),
+          modelLike,
+          wholeConversation,
+          promptEcho,
+          transient: isTransient(text),
+          changed,
+          score
+        };
+      });
+      const latest = candidates[candidates.length - 1] || null;
+      const selected = candidates
+        .filter((candidate) => candidate.changed && !candidate.transient && !candidate.promptEcho && candidate.score > 30)
+        .sort((a, b) => {
+          if (a.score !== b.score) {
+            return b.score - a.score;
+          }
+          return b.index - a.index;
+        })[0] || null;
+      const actions = queryAllDeep(document, "button, [role='button']")
+        .map((element) => labelFor(element).toLowerCase())
+        .filter(Boolean);
+      const generating = actions.some((label) => /stop generating|stop response|停止生成|停止回答|停止回复/.test(label)) ||
+        queryAllDeep(document, "[aria-busy='true'], [role='progressbar'], mat-progress-spinner, mat-spinner, [class*='spinner' i], [class*='loading' i]").length > 0;
+
+      return {
+        output: (selected || latest) ? (selected || latest).text : "",
+        html: (selected || latest) ? (selected || latest).html : "",
+        selectedIndex: (selected || latest) ? (selected || latest).index : -1,
+        selectedScore: selected ? selected.score : 0,
+        selectedFromBaseline: Boolean(selected),
+        url: location.href,
+        title: document.title,
+        candidateCount: candidates.length,
+        candidates: candidates.slice(-80).map((candidate) => ({
+          index: candidate.index,
+          text: candidate.text,
+          fingerprint: candidate.fingerprint,
+          score: candidate.score,
+          changed: candidate.changed,
+          transient: candidate.transient,
+          promptEcho: candidate.promptEcho,
+          modelLike: candidate.modelLike,
+          wholeConversation: candidate.wholeConversation
+        })),
+        generating,
+        capturedAt: Date.now()
+      };
+    }
+  });
+
+  return results && results[0] ? results[0].result : null;
+}
+
+async function handleBranchSnapshot(branchId, snapshot) {
+  if (!snapshot) {
+    return null;
+  }
+
+  const updated = await withStateMutation((state) => {
+    const branch = state.branches[branchId];
+    if (!branch || !Number.isInteger(branch.tabId) || !branch.activeTurnId) {
+      return null;
+    }
+    if (branch.status !== "sending" && branch.status !== "streaming") {
+      return null;
+    }
+    if (!branch.snapshotBaselineCaptured) {
+      return null;
+    }
+
+    const turn = getActiveBranchTurn(branch);
+    if (!turn) {
+      return null;
+    }
+
+    const output = String(snapshot.output || "");
+    const currentOutput = String(turn.output || branch.lastOutput || "");
+    if (!shouldAcceptBranchOutput(branch, output, { allowSame: false }) || normalizeOutputText(output) === normalizeOutputText(currentOutput)) {
+      return null;
+    }
+
+    const now = Date.now();
+    branch.status = "streaming";
+    branch.branchUrl = snapshot.url || branch.branchUrl;
+    branch.lastOutput = output;
+    branch.lastOutputAt = now;
+    branch.error = "";
+    branch.updatedAt = now;
+    updateBranchTurn(branch, branch.activeTurnId, {
+      output,
+      outputHtml: String(snapshot.html || ""),
+      updatedAt: now
+    });
+    return branch;
+  });
+
+  if (updated) {
+    await notifyParent(updated, {
+      type: "GWB_BRANCH_OUTPUT",
+      branchId: updated.id,
+      output: updated.lastOutput,
+      html: getActiveBranchTurn(updated)?.outputHtml || "",
+      branch: updated
+    });
+  }
+
+  const doneBranch = await maybeFinishBranchFromSnapshot(branchId, snapshot);
+  if (doneBranch) {
+    await notifyParent(doneBranch, {
+      type: "GWB_BRANCH_STATE",
+      branch: doneBranch
+    });
+  }
+  return updated || doneBranch;
+}
+
+async function maybeFinishBranchFromSnapshot(branchId, snapshot) {
+  return withStateMutation((state) => {
+    const branch = state.branches[branchId];
+    if (!branch || !branch.activeTurnId || (branch.status !== "sending" && branch.status !== "streaming")) {
+      return null;
+    }
+    const turn = getActiveBranchTurn(branch);
+    if (!turn || !turn.output) {
+      return null;
+    }
+    const lastOutputAt = Number(branch.lastOutputAt || turn.updatedAt || 0);
+    if (!lastOutputAt || Date.now() - lastOutputAt < RESPONSE_IDLE_MS || snapshot.generating) {
+      return null;
+    }
+    branch.status = "ready";
+    branch.activeTurnId = null;
+    branch.updatedAt = Date.now();
+    return branch;
+  });
+}
+
 async function handleBranchOutput(message, sender) {
   const tabId = requireSenderTab(sender);
   const output = String(message.output || "");
   const outputHtml = String(message.html || "");
-  const branch = await updateBranchByTabId(tabId, {
-    status: "streaming",
-    branchUrl: message.url || "",
-    lastOutput: output,
-    error: "",
-    updatedAt: Date.now()
-  }, (branch) => {
+  const branch = await withStateMutation((state) => {
+    const branch = findBranchByTabId(state, tabId);
+    if (!branch || !branch.activeTurnId || (branch.status !== "sending" && branch.status !== "streaming")) {
+      return null;
+    }
+    if (!shouldAcceptBranchOutput(branch, output, { allowSame: false })) {
+      return null;
+    }
+    const now = Date.now();
+    branch.status = "streaming";
+    branch.branchUrl = message.url || branch.branchUrl;
+    branch.lastOutput = output;
+    branch.lastOutputAt = now;
+    branch.error = "";
+    branch.updatedAt = now;
     updateBranchTurn(branch, message.turnId, {
       output,
       outputHtml,
-      updatedAt: Date.now()
+      updatedAt: now
     });
+    return branch;
   });
 
   if (branch) {
@@ -347,22 +722,36 @@ async function handleBranchOutput(message, sender) {
 
 async function handleBranchDone(message, sender) {
   const tabId = requireSenderTab(sender);
-  const patch = {
-    status: "ready",
-    branchUrl: message.url || "",
-    updatedAt: Date.now()
-  };
-  if (typeof message.output === "string") {
-    patch.lastOutput = message.output;
-  }
+  const incomingOutput = typeof message.output === "string" ? String(message.output || "") : "";
+  const incomingHtml = String(message.html || "");
 
-  const branch = await updateBranchByTabId(tabId, patch, (branch) => {
-    updateBranchTurn(branch, message.turnId, {
-      output: String(message.output || ""),
-      outputHtml: String(message.html || ""),
-      updatedAt: Date.now()
-    });
+  const branch = await withStateMutation((state) => {
+    const branch = findBranchByTabId(state, tabId);
+    if (!branch) {
+      return null;
+    }
+    if (!branch.activeTurnId || (branch.status !== "sending" && branch.status !== "streaming")) {
+      return null;
+    }
+    const turn = getActiveBranchTurn(branch);
+    const canUseIncoming = incomingOutput && shouldAcceptBranchOutput(branch, incomingOutput, { allowSame: true });
+    if (canUseIncoming) {
+      const now = Date.now();
+      branch.lastOutput = incomingOutput;
+      branch.lastOutputAt = now;
+      updateBranchTurn(branch, message.turnId, {
+        output: incomingOutput,
+        outputHtml: incomingHtml,
+        updatedAt: now
+      });
+    } else if (!turn || !turn.output) {
+      return null;
+    }
+    branch.status = "ready";
+    branch.branchUrl = message.url || branch.branchUrl;
+    branch.updatedAt = Date.now();
     branch.activeTurnId = null;
+    return branch;
   });
   if (branch) {
     await notifyParent(branch, {
@@ -536,6 +925,142 @@ function updateBranchTurn(branch, turnId, patch) {
   if (target) {
     Object.assign(target, patch);
   }
+}
+
+function getActiveBranchTurn(branch) {
+  const messages = ensureBranchMessages(branch);
+  return messages.find((message) => message.id === branch.activeTurnId) || messages[messages.length - 1] || null;
+}
+
+function branchSnapshotContext(branch) {
+  const turn = getActiveBranchTurn(branch);
+  return {
+    baselineOutput: turn?.baselineOutput || branch.activeTurnBaselineOutput || "",
+    baselineFingerprints: turn?.baselineFingerprints || branch.activeTurnBaselineFingerprints || [],
+    baselineCandidateCount: Number(turn?.baselineCandidateCount || branch.activeTurnBaselineCandidateCount || 0),
+    prompt: turn?.prompt || branch.lastPrompt || "",
+    currentOutput: turn?.output || branch.lastOutput || "",
+    turnStartedAt: branch.activeTurnStartedAt || turn?.createdAt || 0
+  };
+}
+
+function snapshotCandidateFingerprints(snapshot) {
+  if (!snapshot || !Array.isArray(snapshot.candidates)) {
+    return [];
+  }
+  return Array.from(new Set(snapshot.candidates
+    .map((candidate) => normalizeOutputText(candidate.fingerprint || fingerprintOutputText(candidate.text || "")))
+    .filter(Boolean)));
+}
+
+function shouldAcceptBranchOutput(branch, output, options = {}) {
+  const turn = getActiveBranchTurn(branch);
+  const normalized = normalizeOutputText(output);
+  if (!turn || !normalized) {
+    return false;
+  }
+
+  const currentOutput = normalizeOutputText(turn.output || branch.lastOutput || "");
+  if (currentOutput && normalized === currentOutput) {
+    return Boolean(options.allowSame);
+  }
+  if (isTransientGeminiStatusText(normalized)) {
+    return false;
+  }
+
+  const baselineOutput = normalizeOutputText(turn.baselineOutput || branch.activeTurnBaselineOutput || "");
+  const baselineFingerprints = new Set([
+    ...(Array.isArray(turn.baselineFingerprints) ? turn.baselineFingerprints : []),
+    ...(Array.isArray(branch.activeTurnBaselineFingerprints) ? branch.activeTurnBaselineFingerprints : [])
+  ].map(normalizeOutputText).filter(Boolean));
+  if (baselineFingerprints.has(normalized) || baselineFingerprints.has(fingerprintOutputText(normalized)) || isBaselineEchoText(normalized, baselineOutput)) {
+    return false;
+  }
+
+  const prompt = normalizeOutputText(turn.prompt || branch.lastPrompt || "");
+  if (isLikelyWholeConversationOutput(normalized, {
+    baselineOutput,
+    prompt
+  })) {
+    return false;
+  }
+
+  return true;
+}
+
+function isBaselineEchoText(output, baseline) {
+  if (!baseline) {
+    return false;
+  }
+  if (output === baseline) {
+    return true;
+  }
+  const shorter = output.length < baseline.length ? output : baseline;
+  const longer = output.length < baseline.length ? baseline : output;
+  return shorter.length > 80 && longer.includes(shorter) && shorter.length / longer.length > 0.65;
+}
+
+function isLikelyWholeConversationOutput(output, context) {
+  const baseline = normalizeOutputText(context.baselineOutput || "");
+  const prompt = normalizeOutputText(context.prompt || "");
+  if (prompt && (output === prompt || (textIncludesNormalized(output, prompt) && output.length <= prompt.length + 30))) {
+    return true;
+  }
+  if (baseline && textIncludesNormalized(output, baseline) && output.length > baseline.length + 80) {
+    return true;
+  }
+  if (baseline && prompt && textIncludesNormalized(output, baseline) && textIncludesNormalized(output, prompt)) {
+    return true;
+  }
+  return /(\b(you|gemini)\b|你说|我说|用户|assistant|model)/i.test(output) && output.length > 1800 && (
+    Boolean(baseline && textIncludesNormalized(output, baseline)) ||
+    Boolean(prompt && textIncludesNormalized(output, prompt))
+  );
+}
+
+function textIncludesNormalized(text, needle) {
+  const normalizedText = normalizeOutputText(text).toLowerCase();
+  const normalizedNeedle = normalizeOutputText(needle).toLowerCase();
+  return Boolean(normalizedNeedle && normalizedText.includes(normalizedNeedle));
+}
+
+function normalizeOutputText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function fingerprintOutputText(value) {
+  const text = normalizeOutputText(value);
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = ((hash * 31) + text.charCodeAt(index)) >>> 0;
+  }
+  return `${text.length}:${hash.toString(36)}`;
+}
+
+function isTransientGeminiStatusText(output) {
+  const normalized = String(output || "")
+    .toLowerCase()
+    .replace(/[’`]/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized || normalized.length > 180 || normalized.includes("\n")) {
+    return false;
+  }
+  return [
+    /understanding (the )?(user'?s|your) input/,
+    /understanding input/,
+    /thinking/,
+    /generating/,
+    /analy[sz]ing/,
+    /working on it/,
+    /just a sec/,
+    /loading/,
+    /正在(理解|思考|生成|分析|处理)/,
+    /理解.*输入/,
+    /思考中/,
+    /生成中/,
+    /分析中/
+  ].some((pattern) => pattern.test(normalized));
 }
 
 async function notifyParent(branch, payload) {

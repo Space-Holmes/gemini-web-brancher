@@ -32,11 +32,6 @@
     branchLastOutput: "",
     branchLastHtml: "",
     branchBaselineOutput: "",
-    branchBaselineResponseElement: null,
-    branchBaselineResponseCount: 0,
-    branchBaselineResponseTexts: new Set(),
-    branchBaselineResponseElements: new WeakSet(),
-    branchSubmittedPrompt: "",
     branchCurrentTurnId: "",
     branchResponseStartedAt: 0,
     branchLastRealOutputAt: 0,
@@ -1167,13 +1162,7 @@
 
     const editor = await waitForComposer(45000);
     const before = findLatestModelResponse();
-    const baseline = captureResponseBaseline();
     state.branchBaselineOutput = before ? normalizeText(before.innerText || before.textContent || "") : "";
-    state.branchBaselineResponseElement = before || null;
-    state.branchBaselineResponseCount = baseline.count;
-    state.branchBaselineResponseTexts = baseline.texts;
-    state.branchBaselineResponseElements = baseline.elements;
-    state.branchSubmittedPrompt = normalizeText(prompt);
     state.branchCurrentTurnId = turnId || "";
     state.branchResponseStartedAt = Date.now();
     state.branchLastRealOutputAt = 0;
@@ -1231,9 +1220,9 @@
       return;
     }
 
-    const latest = findCurrentTurnModelResponse();
+    const latest = findLatestModelResponse();
     const output = latest ? normalizeText(latest.innerText || latest.textContent || "") : "";
-    if (!output || isBaselineEcho(output) || output === state.branchLastOutput) {
+    if (!output || output === state.branchBaselineOutput || output === state.branchLastOutput) {
       return;
     }
     if (isTransientGeminiStatus(output, latest)) {
@@ -1252,25 +1241,6 @@
     }).catch(console.error);
 
     scheduleBranchDoneCheck();
-  }
-
-  function findCurrentTurnModelResponse() {
-    const latestNewCandidate = findLatestModelResponse({
-      currentTurnOnly: true,
-      minCandidateIndex: state.branchBaselineResponseCount
-    });
-    if (latestNewCandidate) {
-      return latestNewCandidate;
-    }
-
-    if (!canFallbackAfterBaseline()) {
-      return null;
-    }
-
-    return findLatestModelResponse({
-      currentTurnOnly: true,
-      afterElement: state.branchBaselineResponseElement
-    });
   }
 
   function scheduleBranchDoneCheck() {
@@ -1312,19 +1282,7 @@
     }).catch(console.error);
   }
 
-  function findLatestModelResponse(options = {}) {
-    let candidates = getModelResponseCandidates();
-    if (Number.isInteger(options.minCandidateIndex) && options.minCandidateIndex > 0) {
-      candidates = candidates.filter((_element, index) => index >= options.minCandidateIndex);
-    }
-    if (options.afterElement) {
-      candidates = candidates.filter((element) => isAfterElement(element, options.afterElement));
-    }
-    const scoped = options.currentTurnOnly ? filterCurrentTurnResponseCandidates(candidates) : candidates;
-    return scoped[scoped.length - 1] || null;
-  }
-
-  function getModelResponseCandidates() {
+  function findLatestModelResponse() {
     const selectors = [
       "model-response",
       "[data-test-id*='model-response' i]",
@@ -1339,216 +1297,9 @@
     const candidates = uniqueElements(selectors.flatMap((selector) => queryAllDeep(document, selector)))
       .filter((element) => element.id !== ROOT_ID && !element.closest(`#${ROOT_ID}`))
       .filter((element) => state.role === "branch" || isVisible(element))
-      .filter((element) => isLikelyResponseCandidate(element))
-      .filter((element) => normalizeText(element.innerText || element.textContent || "").length > 1);
+      .filter((element) => normalizeText(element.innerText || element.textContent || "").length > 24);
 
-    const leaves = candidates.filter((element) => {
-      const textLength = normalizeText(element.innerText || element.textContent || "").length;
-      return !candidates.some((other) => {
-        if (other === element || !element.contains(other)) {
-          return false;
-        }
-        const otherLength = normalizeText(other.innerText || other.textContent || "").length;
-        return otherLength >= Math.min(textLength * 0.7, 80);
-      });
-    });
-
-    return leaves.length ? leaves : candidates;
-  }
-
-  function filterCurrentTurnResponseCandidates(candidates) {
-    const baselineTexts = state.branchBaselineResponseTexts || new Set();
-    const baselineElements = state.branchBaselineResponseElements;
-    const baselineOutput = state.branchBaselineOutput || "";
-    const submittedPrompt = state.branchSubmittedPrompt || "";
-
-    const scored = candidates
-      .map((element, index) => {
-        const text = normalizeText(element.innerText || element.textContent || "");
-        const fingerprint = responseFingerprint(element);
-        const changedText = Boolean(text && text !== baselineOutput && !baselineTexts.has(fingerprint));
-        const modelLike = looksLikeModelResponseElement(element);
-        const wholeConversation = looksLikeWholeConversationElement(element);
-        const containsPrompt = Boolean(submittedPrompt && textIncludesNormalized(text, submittedPrompt));
-        const containsBaseline = Boolean(baselineOutput && textIncludesNormalized(text, baselineOutput) && text.length > baselineOutput.length + 120);
-        let score = 0;
-
-        if (changedText) {
-          score += 80;
-        }
-        if (baselineElements && !baselineElements.has(element)) {
-          score += 25;
-        }
-        if (modelLike) {
-          score += 55;
-        }
-        if (wholeConversation) {
-          score -= 180;
-        }
-        if (containsPrompt) {
-          score -= modelLike ? 60 : 150;
-        }
-        if (containsBaseline) {
-          score -= 100;
-        }
-        if (text.length > 6000) {
-          score -= 60;
-        }
-
-        return {
-          element,
-          score,
-          index,
-          changedText,
-          modelLike,
-          wholeConversation,
-          containsPrompt,
-          containsBaseline
-        };
-      })
-      .sort((a, b) => {
-        if (a.score !== b.score) {
-          return a.score - b.score;
-        }
-        return a.index - b.index;
-      })
-      .filter((candidate) => candidate.changedText);
-
-    const accepted = scored.filter((candidate) => candidate.score > 20);
-    if (accepted.length) {
-      return accepted.map((candidate) => candidate.element);
-    }
-
-    return scored
-      .filter((candidate) => (
-        candidate.modelLike &&
-        !candidate.wholeConversation &&
-        !candidate.containsPrompt &&
-        !candidate.containsBaseline
-      ))
-      .map((candidate) => candidate.element);
-  }
-
-  function canFallbackAfterBaseline() {
-    return Boolean(
-      state.branchBaselineResponseElement &&
-      state.branchBaselineResponseElement.isConnected &&
-      Date.now() - state.branchResponseStartedAt > 12000
-    );
-  }
-
-  function isAfterElement(element, anchor) {
-    if (!element || !anchor || element === anchor || element.contains(anchor) || anchor.contains(element)) {
-      return false;
-    }
-    if (!element.isConnected || !anchor.isConnected) {
-      return false;
-    }
-    return Boolean(anchor.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING);
-  }
-
-  function isBaselineEcho(output) {
-    const baseline = state.branchBaselineOutput || "";
-    if (!baseline) {
-      return false;
-    }
-    if (output === baseline) {
-      return true;
-    }
-    const shorter = output.length < baseline.length ? output : baseline;
-    const longer = output.length < baseline.length ? baseline : output;
-    return shorter.length > 80 && longer.includes(shorter) && shorter.length / longer.length > 0.65;
-  }
-
-  function captureResponseBaseline() {
-    const candidates = getModelResponseCandidates();
-    return {
-      count: candidates.length,
-      texts: new Set(candidates.map(responseFingerprint).filter(Boolean)),
-      elements: new WeakSet(candidates)
-    };
-  }
-
-  function responseFingerprint(element) {
-    return normalizeText(element.innerText || element.textContent || "");
-  }
-
-  function isLikelyResponseCandidate(element) {
-    if (!element || !(element instanceof Element)) {
-      return false;
-    }
-    if (element.closest("button, [role='button'], input, textarea, select, option")) {
-      return false;
-    }
-    if (element.closest("[role='dialog'], mat-dialog-container, .cdk-overlay-pane")) {
-      return false;
-    }
-    if (element.closest("nav, aside, header") && !looksLikeModelResponseElement(element)) {
-      return false;
-    }
-    return true;
-  }
-
-  function looksLikeModelResponseElement(element) {
-    const descriptor = [
-      element.localName,
-      element.className,
-      element.id,
-      element.getAttribute("data-test-id"),
-      element.getAttribute("data-testid"),
-      element.getAttribute("aria-label"),
-      element.getAttribute("role")
-    ]
-      .filter(Boolean)
-      .join(" ")
-      .toLowerCase();
-    return /model-response|response|assistant|message-content|markdown/.test(descriptor);
-  }
-
-  function looksLikeWholeConversationElement(element) {
-    if (!element || !(element instanceof Element)) {
-      return false;
-    }
-    if (element.matches("model-response, message-content, .markdown")) {
-      return countNestedResponseCandidates(element) > 1;
-    }
-    const descriptor = [
-      element.localName,
-      element.className,
-      element.id,
-      element.getAttribute("data-test-id"),
-      element.getAttribute("data-testid"),
-      element.getAttribute("role")
-    ]
-      .filter(Boolean)
-      .join(" ")
-      .toLowerCase();
-    if (/conversation|chat-history|conversation-container|main/.test(descriptor) && countNestedResponseCandidates(element) > 1) {
-      return true;
-    }
-    const text = normalizeText(element.innerText || element.textContent || "");
-    return /(\b(you|gemini)\b|你说|我说|用户|assistant|model)/i.test(text) && text.length > 1800;
-  }
-
-  function countNestedResponseCandidates(element) {
-    return queryAllDeep(element, [
-      "model-response",
-      "[data-test-id*='model-response' i]",
-      "[data-testid*='model-response' i]",
-      "[data-test-id*='response' i]",
-      "[data-testid*='response' i]",
-      "[class*='model-response' i]",
-      "message-content",
-      ".markdown"
-    ].join(","))
-      .filter((candidate) => candidate !== element)
-      .length;
-  }
-
-  function textIncludesNormalized(text, needle) {
-    const normalizedText = normalizeText(text).toLowerCase();
-    const normalizedNeedle = normalizeText(needle).toLowerCase();
-    return Boolean(normalizedNeedle && normalizedText.includes(normalizedNeedle));
+    return candidates[candidates.length - 1] || null;
   }
 
   function isTransientGeminiStatus(output, element) {

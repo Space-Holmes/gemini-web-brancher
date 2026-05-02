@@ -32,9 +32,12 @@
     branchLastOutput: "",
     branchLastHtml: "",
     branchBaselineOutput: "",
+    branchBaselineResponseElement: null,
     branchBaselineResponseTexts: new Set(),
     branchBaselineResponseElements: new WeakSet(),
+    branchBaselinePromptElements: new WeakSet(),
     branchSubmittedPrompt: "",
+    branchSubmittedPromptElement: null,
     branchCurrentTurnId: "",
     branchResponseStartedAt: 0,
     branchLastRealOutputAt: 0,
@@ -1166,10 +1169,14 @@
     const editor = await waitForComposer(45000);
     const before = findLatestModelResponse();
     const baseline = captureResponseBaseline();
+    const promptBaseline = capturePromptBaseline(prompt);
     state.branchBaselineOutput = before ? normalizeText(before.innerText || before.textContent || "") : "";
+    state.branchBaselineResponseElement = before || null;
     state.branchBaselineResponseTexts = baseline.texts;
     state.branchBaselineResponseElements = baseline.elements;
+    state.branchBaselinePromptElements = promptBaseline.elements;
     state.branchSubmittedPrompt = normalizeText(prompt);
+    state.branchSubmittedPromptElement = null;
     state.branchCurrentTurnId = turnId || "";
     state.branchResponseStartedAt = Date.now();
     state.branchLastRealOutputAt = 0;
@@ -1187,6 +1194,7 @@
     state.branchLastHtml = "";
     startBranchOutputPolling();
     await sleep(1000);
+    state.branchSubmittedPromptElement = findSubmittedPromptAnchor();
     scanBranchOutput();
   }
 
@@ -1227,11 +1235,17 @@
       return;
     }
 
+    const promptAnchor = findSubmittedPromptAnchor();
+    if (!promptAnchor && !canFallbackWithoutPromptAnchor()) {
+      return;
+    }
+
     const latest = findLatestModelResponse({
-      currentTurnOnly: true
+      currentTurnOnly: true,
+      afterElement: promptAnchor || state.branchBaselineResponseElement
     });
     const output = latest ? normalizeText(latest.innerText || latest.textContent || "") : "";
-    if (!output || output === state.branchBaselineOutput || output === state.branchLastOutput) {
+    if (!output || isBaselineEcho(output) || output === state.branchLastOutput) {
       return;
     }
     if (isTransientGeminiStatus(output, latest)) {
@@ -1292,7 +1306,10 @@
   }
 
   function findLatestModelResponse(options = {}) {
-    const candidates = getModelResponseCandidates();
+    let candidates = getModelResponseCandidates();
+    if (options.afterElement) {
+      candidates = candidates.filter((element) => isAfterElement(element, options.afterElement));
+    }
     const scoped = options.currentTurnOnly ? filterCurrentTurnResponseCandidates(candidates) : candidates;
     return scoped[scoped.length - 1] || null;
   }
@@ -1400,6 +1417,144 @@
         !candidate.containsBaseline
       ))
       .map((candidate) => candidate.element);
+  }
+
+  function capturePromptBaseline(prompt) {
+    return {
+      elements: new WeakSet(getPromptCandidateElements(prompt))
+    };
+  }
+
+  function findSubmittedPromptAnchor() {
+    if (
+      state.branchSubmittedPromptElement &&
+      state.branchSubmittedPromptElement.isConnected &&
+      elementContainsPrompt(state.branchSubmittedPromptElement, state.branchSubmittedPrompt)
+    ) {
+      return state.branchSubmittedPromptElement;
+    }
+
+    const prompt = state.branchSubmittedPrompt;
+    if (!prompt) {
+      return null;
+    }
+
+    const candidates = getPromptCandidateElements(prompt)
+      .filter((element) => !(state.branchBaselinePromptElements && state.branchBaselinePromptElements.has(element)))
+      .filter((element) => {
+        if (!state.branchBaselineResponseElement || !state.branchBaselineResponseElement.isConnected) {
+          return true;
+        }
+        return isAfterElement(element, state.branchBaselineResponseElement);
+      })
+      .sort(compareDocumentOrder);
+
+    const anchor = candidates[candidates.length - 1] || null;
+    if (anchor) {
+      state.branchSubmittedPromptElement = anchor;
+    }
+    return anchor;
+  }
+
+  function getPromptCandidateElements(prompt) {
+    const normalizedPrompt = normalizeText(prompt);
+    if (!normalizedPrompt) {
+      return [];
+    }
+
+    const selectors = [
+      "[data-test-id*='user' i]",
+      "[data-testid*='user' i]",
+      "[class*='user' i]",
+      "[class*='query' i]",
+      "[class*='prompt' i]",
+      "[class*='message' i]",
+      "[role='heading']",
+      "user-query",
+      "message-content",
+      ".markdown",
+      "div",
+      "span",
+      "p"
+    ];
+
+    return uniqueElements(selectors.flatMap((selector) => queryAllDeep(document, selector)))
+      .filter((element) => element.id !== ROOT_ID && !element.closest(`#${ROOT_ID}`))
+      .filter((element) => isLikelyPromptCandidate(element))
+      .filter((element) => elementContainsPrompt(element, normalizedPrompt))
+      .filter((element) => !hasSmallerPromptMatch(element, normalizedPrompt));
+  }
+
+  function isLikelyPromptCandidate(element) {
+    if (!element || !(element instanceof Element)) {
+      return false;
+    }
+    if (element.matches("script, style, noscript, textarea, input, button, [role='button']")) {
+      return false;
+    }
+    if (element.closest("textarea, input, button, [role='button'], nav, aside, header")) {
+      return false;
+    }
+    if (element.closest("[role='dialog'], mat-dialog-container, .cdk-overlay-pane")) {
+      return false;
+    }
+    return state.role === "branch" || isVisible(element);
+  }
+
+  function elementContainsPrompt(element, prompt) {
+    const text = normalizeText(element.innerText || element.textContent || "");
+    const normalizedPrompt = normalizeText(prompt);
+    if (!text || !normalizedPrompt) {
+      return false;
+    }
+    return text === normalizedPrompt || textIncludesNormalized(text, normalizedPrompt);
+  }
+
+  function hasSmallerPromptMatch(element, prompt) {
+    return queryAllDeep(element, "*")
+      .filter((child) => child !== element)
+      .some((child) => isLikelyPromptCandidate(child) && elementContainsPrompt(child, prompt));
+  }
+
+  function canFallbackWithoutPromptAnchor() {
+    return Boolean(
+      state.branchBaselineResponseElement &&
+      state.branchBaselineResponseElement.isConnected &&
+      Date.now() - state.branchResponseStartedAt > 12000
+    );
+  }
+
+  function isAfterElement(element, anchor) {
+    if (!element || !anchor || element === anchor || element.contains(anchor) || anchor.contains(element)) {
+      return false;
+    }
+    if (!element.isConnected || !anchor.isConnected) {
+      return false;
+    }
+    return Boolean(anchor.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING);
+  }
+
+  function compareDocumentOrder(a, b) {
+    if (a === b) {
+      return 0;
+    }
+    if (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) {
+      return -1;
+    }
+    return 1;
+  }
+
+  function isBaselineEcho(output) {
+    const baseline = state.branchBaselineOutput || "";
+    if (!baseline) {
+      return false;
+    }
+    if (output === baseline) {
+      return true;
+    }
+    const shorter = output.length < baseline.length ? output : baseline;
+    const longer = output.length < baseline.length ? baseline : output;
+    return shorter.length > 80 && longer.includes(shorter) && shorter.length / longer.length > 0.65;
   }
 
   function captureResponseBaseline() {

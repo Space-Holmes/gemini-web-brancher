@@ -16,7 +16,7 @@
 - 可用页面里的 Mark Trunk 按钮把当前主对话标题标记为 `--TRUNK`；创建 branch 时不会自动弹出重命名窗口。
 - Branch 面板会按当前主对话分组显示，并最多三列并排显示，桌面端宽度为页面宽度减去 160px。
 - 主页面会主动轮询并轻量唤醒正在生成的 branch worker，忽略 Gemini 的中间理解/思考状态，等真实回答稳定后才结束回传。
-- Branch 回传保留 `0.1.6` 的同步输入路径，并优先按本次 prompt 后的新 Gemini 回复抓取；background 快照兜底会过滤发送前已存在的回复、整段对话容器和 Gemini 中间状态。
+- Branch 回传保留 `0.1.6` 的同步输入路径，并优先把本次用户问题和其后的 `model-response` 成对定位；background 快照兜底会过滤发送前已存在的回复、整段对话容器和 Gemini 中间状态。
 - Branch 编号会按当前主对话历史持续递增，关闭全部 branch 后再次创建也不会从 1 重置。
 - 可从 branch 面板或扩展弹窗打开 branch worker 窗口进行人工排查。
 

@@ -691,7 +691,8 @@ async function handleBranchOutput(message, sender) {
     }
     if (!shouldAcceptBranchOutput(branch, output, {
       allowSame: false,
-      trustedCapture: isTrustedContentCapture(message.captureMode)
+      trustedCapture: isTrustedContentCapture(message.captureMode),
+      anchoredCapture: isAnchoredContentCapture(message.captureMode)
     })) {
       return null;
     }
@@ -739,7 +740,8 @@ async function handleBranchDone(message, sender) {
     const turn = getActiveBranchTurn(branch);
     const canUseIncoming = incomingOutput && shouldAcceptBranchOutput(branch, incomingOutput, {
       allowSame: true,
-      trustedCapture: isTrustedContentCapture(message.captureMode)
+      trustedCapture: isTrustedContentCapture(message.captureMode),
+      anchoredCapture: isAnchoredContentCapture(message.captureMode)
     });
     if (canUseIncoming) {
       const now = Date.now();
@@ -979,7 +981,11 @@ function shouldAcceptBranchOutput(branch, output, options = {}) {
     ...(Array.isArray(turn.baselineFingerprints) ? turn.baselineFingerprints : []),
     ...(Array.isArray(branch.activeTurnBaselineFingerprints) ? branch.activeTurnBaselineFingerprints : [])
   ].map(normalizeOutputText).filter(Boolean));
-  if (baselineFingerprints.has(normalized) || baselineFingerprints.has(fingerprintOutputText(normalized)) || isBaselineEchoText(normalized, baselineOutput)) {
+  if (!options.anchoredCapture && (
+    baselineFingerprints.has(normalized) ||
+    baselineFingerprints.has(fingerprintOutputText(normalized)) ||
+    isBaselineEchoText(normalized, baselineOutput)
+  )) {
     return false;
   }
 
@@ -996,9 +1002,17 @@ function shouldAcceptBranchOutput(branch, output, options = {}) {
 
 function isTrustedContentCapture(captureMode) {
   return [
+    "turn-pair",
     "prompt-anchor",
     "new-candidate",
     "after-baseline"
+  ].includes(String(captureMode || ""));
+}
+
+function isAnchoredContentCapture(captureMode) {
+  return [
+    "turn-pair",
+    "prompt-anchor"
   ].includes(String(captureMode || ""));
 }
 

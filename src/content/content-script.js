@@ -1272,6 +1272,14 @@
   function findCurrentTurnBranchResponse() {
     const promptAnchor = findSubmittedPromptAnchor();
     if (promptAnchor) {
+      const paired = findModelResponseAfterPromptAnchor(promptAnchor);
+      if (paired) {
+        return {
+          element: paired,
+          mode: "turn-pair"
+        };
+      }
+
       const anchored = findLatestBranchModelResponse({
         currentTurnOnly: true,
         afterElement: promptAnchor
@@ -1308,6 +1316,91 @@
     }
 
     return null;
+  }
+
+  function findModelResponseAfterPromptAnchor(promptAnchor) {
+    const responseBlocks = getModelResponseBlocks()
+      .filter((element) => isAfterElement(element, promptAnchor))
+      .sort(compareDocumentOrder);
+    for (const block of responseBlocks) {
+      const response = pickReadableResponseContent(block);
+      const output = response ? normalizeText(response.innerText || response.textContent || "") : "";
+      if (
+        !output ||
+        output === state.branchBaselineOutput ||
+        isBaselineEcho(output) ||
+        isTransientGeminiStatus(output, response) ||
+        isActionOnlyResponseText(output, response)
+      ) {
+        continue;
+      }
+      return response;
+    }
+    return null;
+  }
+
+  function getModelResponseBlocks() {
+    const selectors = [
+      "model-response",
+      "[data-test-id*='model-response' i]",
+      "[data-testid*='model-response' i]",
+      "[class*='model-response' i]",
+      "[data-test-id*='response' i]",
+      "[data-testid*='response' i]"
+    ];
+    return uniqueElements(selectors.flatMap((selector) => queryAllDeep(document, selector)))
+      .filter((element) => element.id !== ROOT_ID && !element.closest(`#${ROOT_ID}`))
+      .filter((element) => state.role === "branch" || isVisible(element))
+      .filter(isLikelyResponseCandidate)
+      .filter((element) => !element.closest("nav, aside, header, [role='dialog'], mat-dialog-container, .cdk-overlay-pane"))
+      .filter((element) => normalizeText(element.innerText || element.textContent || "").length > 1)
+      .filter((element) => !getModelResponseContainer(element.parentElement || document.body));
+  }
+
+  function getModelResponseContainer(element) {
+    if (!element || !(element instanceof Element)) {
+      return null;
+    }
+    return element.closest("model-response, [data-test-id*='model-response' i], [data-testid*='model-response' i], [class*='model-response' i]");
+  }
+
+  function pickReadableResponseContent(block) {
+    const contentSelectors = [
+      "message-content",
+      ".markdown",
+      "[class*='markdown' i]",
+      "[data-test-id*='content' i]",
+      "[data-testid*='content' i]"
+    ];
+    const contents = uniqueElements(contentSelectors.flatMap((selector) => queryAllDeep(block, selector)))
+      .filter((element) => !element.closest("button, [role='button'], nav, aside, header"))
+      .filter((element) => normalizeText(element.innerText || element.textContent || "").length > 1)
+      .filter((element) => !contentsContainLargerChild(element))
+      .sort((a, b) => normalizeText(a.innerText || a.textContent || "").length - normalizeText(b.innerText || b.textContent || "").length);
+    return contents[contents.length - 1] || block;
+  }
+
+  function contentsContainLargerChild(element) {
+    const textLength = normalizeText(element.innerText || element.textContent || "").length;
+    return queryAllDeep(element, "message-content, .markdown, [class*='markdown' i]")
+      .filter((child) => child !== element)
+      .some((child) => normalizeText(child.innerText || child.textContent || "").length >= Math.min(textLength * 0.75, 80));
+  }
+
+  function isActionOnlyResponseText(output, element) {
+    const normalized = normalizeText(output).toLowerCase();
+    if (!normalized || normalized.length > 160) {
+      return false;
+    }
+    const actionWords = /copy|listen|share|export|like|dislike|复制|听|分享|导出|赞|踩|更多|重新生成|regenerate|retry/g;
+    const matches = normalized.match(actionWords) || [];
+    if (matches.length >= 2) {
+      return true;
+    }
+    if (element && element.querySelectorAll && !element.querySelector("p, li, pre, code, table, math, .katex, [class*='markdown' i]")) {
+      return element.querySelectorAll("button, [role='button']").length > 0;
+    }
+    return false;
   }
 
   function scheduleBranchDoneCheck() {
@@ -1537,8 +1630,46 @@
     const anchor = candidates[candidates.length - 1] || null;
     if (anchor) {
       state.branchSubmittedPromptElement = anchor;
+      return anchor;
     }
-    return anchor;
+
+    const latestUserTurn = findLatestUserTurnAfterBaseline();
+    if (latestUserTurn) {
+      state.branchSubmittedPromptElement = latestUserTurn;
+      return latestUserTurn;
+    }
+    return null;
+  }
+
+  function findLatestUserTurnAfterBaseline() {
+    const selectors = [
+      "user-query",
+      "[data-test-id*='user-query' i]",
+      "[data-testid*='user-query' i]",
+      "[class*='user-query' i]",
+      "[data-test-id*='user' i]",
+      "[data-testid*='user' i]",
+      "[class*='user-message' i]",
+      "[class*='query' i]"
+    ];
+    const candidates = uniqueElements(selectors.flatMap((selector) => queryAllDeep(document, selector)))
+      .filter((element) => element.id !== ROOT_ID && !element.closest(`#${ROOT_ID}`))
+      .filter((element) => isLikelyPromptCandidate(element))
+      .filter((element) => normalizeText(element.innerText || element.textContent || "").length > 0)
+      .filter((element) => {
+        if (!state.branchBaselineResponseElement || !state.branchBaselineResponseElement.isConnected) {
+          return true;
+        }
+        return isAfterElement(element, state.branchBaselineResponseElement);
+      })
+      .filter((element) => !hasLargerUserTurnAncestor(element))
+      .sort(compareDocumentOrder);
+    return candidates[candidates.length - 1] || null;
+  }
+
+  function hasLargerUserTurnAncestor(element) {
+    const ancestor = element.parentElement && element.parentElement.closest("user-query, [data-test-id*='user-query' i], [data-testid*='user-query' i], [class*='user-query' i], [class*='user-message' i]");
+    return Boolean(ancestor && ancestor !== element);
   }
 
   function getPromptCandidateElements(prompt) {

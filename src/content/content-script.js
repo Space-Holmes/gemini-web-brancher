@@ -733,7 +733,7 @@
         return true;
       }
 
-      await focusAndSetText(editor, desiredTitle);
+      await replaceEditorText(editor, desiredTitle);
       await waitForElement(() => getEditorText(editor) === desiredTitle ? editor : null, 1200).catch(() => null);
       await sleep(250);
 
@@ -1173,7 +1173,7 @@
     state.branchResponseStartedAt = Date.now();
     state.branchLastRealOutputAt = 0;
     state.branchStreaming = true;
-    await focusAndSetText(editor, prompt);
+    focusAndSetText(editor, prompt);
     await sleep(250);
 
     const sendButton = findSendButton(editor);
@@ -1303,24 +1303,9 @@
     const candidates = uniqueElements(selectors.flatMap((selector) => queryAllDeep(document, selector)))
       .filter((element) => element.id !== ROOT_ID && !element.closest(`#${ROOT_ID}`))
       .filter((element) => state.role === "branch" || isVisible(element))
-      .filter((element) => normalizeText(element.innerText || element.textContent || "").length > 24)
-      .sort(compareDocumentOrder);
+      .filter((element) => normalizeText(element.innerText || element.textContent || "").length > 24);
 
     return candidates[candidates.length - 1] || null;
-  }
-
-  function compareDocumentOrder(a, b) {
-    if (a === b) {
-      return 0;
-    }
-    const position = a.compareDocumentPosition(b);
-    if (position & Node.DOCUMENT_POSITION_FOLLOWING) {
-      return -1;
-    }
-    if (position & Node.DOCUMENT_POSITION_PRECEDING) {
-      return 1;
-    }
-    return 0;
   }
 
   function isTransientGeminiStatus(output, element) {
@@ -1762,7 +1747,32 @@
     return editors[editors.length - 1] || null;
   }
 
-  async function focusAndSetText(editor, text) {
+  function focusAndSetText(editor, text) {
+    editor.focus();
+    if (editor instanceof HTMLTextAreaElement || editor instanceof HTMLInputElement) {
+      editor.value = text;
+      editor.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        inputType: "insertText",
+        data: text
+      }));
+      editor.dispatchEvent(new Event("change", { bubbles: true }));
+      return;
+    }
+
+    document.getSelection().selectAllChildren(editor);
+    const inserted = document.execCommand && document.execCommand("insertText", false, text);
+    if (!inserted) {
+      editor.textContent = text;
+      editor.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        inputType: "insertText",
+        data: text
+      }));
+    }
+  }
+
+  async function replaceEditorText(editor, text) {
     editor.focus();
     if (editor instanceof HTMLTextAreaElement || editor instanceof HTMLInputElement) {
       setFormControlValue(editor, "");
